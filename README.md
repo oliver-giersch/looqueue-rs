@@ -5,7 +5,7 @@ The paper describes the algorithm for a multi-producer, multi-consumer queue wit
 
 [1] _O. Giersch and J. Nolte, "Fast and Portable Concurrent FIFO Queues With Deterministic Memory Reclamation", in IEEE Transactions on Parallel and Distributed Systems, vol. 33, no. 3, pp. 604-616, 1 March 2022, doi: 10.1109/TPDS.2021.3097901_
 
-# Usage
+## Usage
 
 Add the following to your `Cargo.toml`
 
@@ -14,7 +14,7 @@ Add the following to your `Cargo.toml`
 loo = "0.1.0"
 ```
 
-# Example
+## Example
 
 The API of this crate is similar to that of `std::mpsc`.
 Creating new queue instances is achieved by calling either `mpmp::queue()` or `mpsc::queue()`, which return reference-counted `(producer, consumer)` handle tuples.
@@ -41,4 +41,9 @@ assert_eq!(rx.pop_front(), Some(3));
 assert_eq!(rx.pop_front(), None);
 ```
 
-# License
+## License
+
+`loo` is distributed under the terms of both the MIT license and the
+Apache License (Version 2.0).
+
+See [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT) for details.
