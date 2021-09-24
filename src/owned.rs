@@ -144,7 +144,7 @@ impl<T> FromIterator<T> for OwnedQueue<T> {
         I: IntoIterator<Item = T>,
     {
         let iter = iter.into_iter();
-        let mut queue = OwnedQueue::new();
+        let mut queue = Self::new();
 
         for elem in iter {
             let idx = queue.tail.idx;

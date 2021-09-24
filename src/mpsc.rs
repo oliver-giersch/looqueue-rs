@@ -45,10 +45,10 @@ pub fn from_iter<T>(iter: impl Iterator<Item = T>) -> (Producer<T>, Consumer<T>)
     (Producer { ptr }, Consumer { ptr })
 }
 
-/// A producer handle to a [`mpsc`][crate::mpsc] queue.
+/// A producer handle to a [`mpsc`](crate::mpsc) queue.
 ///
 /// Producer handles may be cloned, allowing multiple threads to push elements in safe manner, but
-/// at most [`MAX_PRODUCERS`][crate::MAX_PRODUCERS] may exist at the same time
+/// at most [`MAX_PRODUCERS`](crate::MAX_PRODUCERS) may exist at the same time
 pub struct Producer<T> {
     ptr: NonNull<ArcQueue<T>>,
 }
@@ -98,7 +98,7 @@ impl<T> Producer<T> {
     }
 }
 
-/// A unique consumer handle to a [`mpsc`][crate::mpsc] queue.
+/// A unique consumer handle to a [`mpsc`](crate::mpsc) queue.
 pub struct Consumer<T> {
     ptr: NonNull<ArcQueue<T>>,
 }
@@ -115,7 +115,7 @@ impl<T> Drop for Consumer<T> {
         if is_last {
             // SAFETY: there are now other live handles and none can be created anymore at this
             // point, so the handle can be safely deallocated
-            let _ = unsafe { Box::from_raw(self.ptr.as_ptr()) };
+            mem::drop(unsafe { Box::from_raw(self.ptr.as_ptr()) });
         }
     }
 }
@@ -123,6 +123,7 @@ impl<T> Drop for Consumer<T> {
 impl<T> Consumer<T> {
     /// Returns `true` if the queue is empty.
     pub fn is_empty(&self) -> bool {
+        // SAFETY: pointer deref is sound, since at least one live handle exists
         let (is_empty, _) = unsafe { self.ptr.as_ref().raw.check_empty() };
         is_empty
     }
@@ -199,7 +200,7 @@ impl<T> RawQueue<T> {
     ///
     /// # Safety
     ///
-    /// Must not be called concurrently by more than [`MAX_PRODUCERS`][crate::MAX_PRODUCERS] threads.
+    /// Must not be called concurrently by more than [`MAX_PRODUCERS`](crate::MAX_PRODUCERS) threads.
     unsafe fn push_back(&self, elem: T) {
         // the ownership of `elem` becomes fuzzy during the subsequent loop and must not be dropped
         let elem = ManuallyDrop::new(elem);
@@ -222,12 +223,12 @@ impl<T> RawQueue<T> {
                         continue;
                     }
                 }
-            } else {
-                // try to append a new node with elem already inserted
-                match self.try_advance_tail(&elem, tail) {
-                    Ok(_) => return,
-                    Err(_) => continue,
-                }
+            }
+
+            // try to append a new node with elem already inserted
+            match self.try_advance_tail(&elem, tail) {
+                Ok(_) => return,
+                Err(_) => continue,
             }
         }
     }
@@ -259,30 +260,30 @@ impl<T> RawQueue<T> {
                     // completed in time
                     ConsumeResult::Abandon { .. } => continue,
                 }
-            } else {
-                // the first "slow path" call initiates the check-slots procedure
-                if idx == NODE_SIZE {
-                    // increment the idx for a final time to ensure this branch is only called once
-                    // and function can be called again, if the there is no next node yet
-                    self.head.set(Cursor { ptr: head, idx: idx + 1 });
-                    // the check can never succeede to reclaim the node, because the pop operation
-                    // itself is not yet accounted for (i.e., the HEAD_ADVANCED bit is not yet set),
-                    // hence the method is called with `RECLAIM = false`
-                    unsafe { Node::check_slots_and_try_reclaim::<false>(head, 0) };
-                }
+            }
 
-                // read tail again to ensure that `None` is never returned after a linearized push
-                if head == self.tail.load(Ordering::Acquire).decompose_ptr() {
-                    return None;
-                }
+            // the first "slow path" call initiates the check-slots procedure
+            if idx == NODE_SIZE {
+                // increment the idx for a final time to ensure this branch is only called once
+                // and function can be called again, if the there is no next node yet
+                self.head.set(Cursor { ptr: head, idx: idx + 1 });
+                // the check can never succeede to reclaim the node, because the pop operation
+                // itself is not yet accounted for (i.e., the HEAD_ADVANCED bit is not yet set),
+                // hence the method is called with `RECLAIM = false`
+                unsafe { Node::check_slots_and_try_reclaim::<false>(head, 0) };
+            }
 
-                // next does not have to be checked for null, since it was already determined, that
-                // head != tail, which is sufficient as next is always set before updating tail
-                unsafe {
-                    let next = (*head).next.load(Ordering::Acquire);
-                    self.head.set(Cursor { ptr: next, idx: 0 });
-                    Node::set_flag_and_try_reclaim(head, ControlBlock::HEAD_ADVANCED);
-                }
+            // read tail again to ensure that `None` is never returned after a linearized push
+            if head == self.tail.load(Ordering::Acquire).decompose_ptr() {
+                return None;
+            }
+
+            // next does not have to be checked for null, since it was already determined, that
+            // head != tail, which is sufficient as next is always set before updating tail
+            unsafe {
+                let next = (*head).next.load(Ordering::Acquire);
+                self.head.set(Cursor { ptr: next, idx: 0 });
+                Node::set_flag_and_try_reclaim::<{ ControlBlock::HEAD_ADVANCED }, true>(head);
             }
         }
     }

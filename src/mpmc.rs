@@ -1,7 +1,6 @@
 //! The multi-producer, multi-consumer (MPMC) variant of the *looqueue* algorithm.
 
 use std::{
-    iter::FromIterator,
     mem::{self, ManuallyDrop},
     ptr::NonNull,
     sync::atomic::{AtomicPtr, Ordering},
@@ -16,6 +15,7 @@ use crate::{
 
 /// Creates a new concurrent multi-producer, multi-consumer (MPMC) queue and returns (cloneable)
 /// [`Producer`] and [`Consumer`] handles to that queue.
+#[must_use]
 pub fn queue<T>() -> (Producer<T>, Consumer<T>) {
     // allocate the reference-counted queue handle
     let ptr = NonNull::from(Box::leak(Box::new(ArcQueue {
@@ -30,7 +30,7 @@ pub fn queue<T>() -> (Producer<T>, Consumer<T>) {
 /// (cloneable) [`Producer`] and [`Consumer`] handles to that queue.
 pub fn from_iter<T>(iter: impl Iterator<Item = T>) -> (Producer<T>, Consumer<T>) {
     // collect the iterator (single-threaded) into a owned queue
-    let (head, tail) = OwnedQueue::from_iter(iter).into_raw_parts();
+    let (head, tail) = iter.collect::<OwnedQueue<_>>().into_raw_parts();
 
     // allocate the reference-counted queue handle
     let ptr = NonNull::from(Box::leak(Box::new(ArcQueue {
@@ -45,11 +45,11 @@ pub fn from_iter<T>(iter: impl Iterator<Item = T>) -> (Producer<T>, Consumer<T>)
     (Producer { ptr }, Consumer { ptr })
 }
 
-/// A producer handle to a [`mpmc`][crate::mpmc] queue.
+/// A producer handle to a [`mpmc`](crate::mpmc) queue.
 ///
 /// Producer handles may be cloned, allowing multiple threads to push elements in safe manner, but
-/// at most [`MAX_PRODUCERS`][crate::MAX_PRODUCERS] may exist at the same time.
-/// Attempting to create additional handles causes calls to [`clone`][Clone::clone] to panic.
+/// at most [`MAX_PRODUCERS`](crate::MAX_PRODUCERS) may exist at the same time.
+/// Attempting to create additional handles causes calls to [`clone`](Clone::clone) to panic.
 pub struct Producer<T> {
     ptr: NonNull<ArcQueue<T>>,
 }
@@ -73,7 +73,7 @@ impl<T> Drop for Producer<T> {
         if is_last {
             // SAFETY: there are now other live handles and none can be created anymore at this
             // point, so the handle can be safely deallocated
-            let _ = unsafe { Box::from_raw(self.ptr.as_ptr()) };
+            mem::drop(unsafe { Box::from_raw(self.ptr.as_ptr()) });
         }
     }
 }
@@ -97,11 +97,11 @@ impl<T> Producer<T> {
     }
 }
 
-/// A consumer handle to a [`mpmc`][crate::mpmc] queue.
+/// A consumer handle to a [`mpmc`](crate::mpmc) queue.
 ///
 /// Consumer handles may be cloned, allowing multiple threads to pop elements in safe manner, but
-/// at most [`MAX_CONSUMERS`][crate::MAX_CONSUMERS] may exist at the same time.
-/// Attempting to create additional handles causes calls to [`clone`][Clone::clone] to panic.
+/// at most [`MAX_CONSUMERS`](crate::MAX_CONSUMERS) may exist at the same time.
+/// Attempting to create additional handles causes calls to [`clone`](Clone::clone) to panic.
 pub struct Consumer<T> {
     ptr: NonNull<ArcQueue<T>>,
 }
@@ -123,7 +123,7 @@ impl<T> Drop for Consumer<T> {
         // SAFETY: pointer deref is sound, since at least one live handle exists
         let is_last = unsafe { self.ptr.as_ref().counts.decrease_consumer_count() };
         if is_last {
-            let _ = unsafe { Box::from_raw(self.ptr.as_ptr()) };
+            mem::drop(unsafe { Box::from_raw(self.ptr.as_ptr()) });
         }
     }
 }
@@ -194,7 +194,7 @@ impl<T> RawQueue<T> {
     ///
     /// # Safety
     ///
-    /// Must not be called concurrently by more than [`MAX_PRODUCERS`][crate::MAX_PRODUCERS] threads.
+    /// Must not be called concurrently by more than [`MAX_PRODUCERS`](crate::MAX_PRODUCERS) threads.
     unsafe fn push_back(&self, elem: T) {
         // the ownership of `elem` becomes fuzzy during the subsequent loop and must not be dropped
         let elem = ManuallyDrop::new(elem);
@@ -217,12 +217,12 @@ impl<T> RawQueue<T> {
                         continue;
                     }
                 }
-            } else {
-                // try to append a new node with elem already inserted
-                match self.try_advance_tail(&elem, tail) {
-                    Ok(_) => return,
-                    Err(_) => continue,
-                }
+            }
+
+            // try to append a new node with elem already inserted
+            match self.try_advance_tail(&elem, tail) {
+                Ok(_) => return,
+                Err(_) => continue,
             }
         }
     }
@@ -265,17 +265,17 @@ impl<T> RawQueue<T> {
                         continue;
                     }
                 };
-            } else {
-                // the first "slow path" call initiates the check-slots procedure
-                if idx == NODE_SIZE {
-                    unsafe { Node::check_slots_and_try_reclaim::<false>(head, 0) };
-                }
+            }
 
-                // attempt to advance head to its successor node and retry, if there is one
-                match self.try_advance_head(current, head) {
-                    Ok(_) => continue,
-                    Err(_) => return None,
-                }
+            // the first "slow path" call initiates the check-slots procedure
+            if idx == NODE_SIZE {
+                unsafe { Node::check_slots_and_try_reclaim::<false>(head, 0) };
+            }
+
+            // attempt to advance head to its successor node and retry, if there is one
+            match self.try_advance_head(current, head) {
+                Ok(_) => continue,
+                Err(_) => return None,
             }
         }
     }

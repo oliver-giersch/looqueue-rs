@@ -63,13 +63,13 @@ impl<T> Slot<T> {
         self.state.load(Ordering::Acquire) & CONSUMED == CONSUMED
     }
 
-    /// Atomically sets the resume bit in the slots state mask.
+    /// Atomically sets the [`CONTINUE`] bit in the slots state mask.
     ///
     /// # Safety
     ///
     /// Must only be called during the *check slots* procedure and after determining, the slot has
     /// not yet been consumed.
-    pub(crate) unsafe fn set_resume_bit(&self) -> bool {
+    pub(crate) unsafe fn set_continue_bit(&self) -> bool {
         self.state.fetch_add(CONTINUE, Ordering::Relaxed) & CONSUMED == CONSUMED
     }
 

@@ -19,10 +19,10 @@ pub use crate::owned::OwnedQueue;
 use crate::slot::Slot;
 
 /// The maximum number of producer handles that max exist at the same time for a single
-/// [`mpsc`][crate::mpsc] or [`mpmpc`][crate::mpmc] queue.
+/// [`mpsc`](crate::mpsc) or [`mpmpc`](crate::mpmc) queue.
 pub const MAX_PRODUCERS: usize = (1 << TAG_BITS) - NODE_SIZE + 1;
 /// The maximum number of consumer handles that max exist at the same time for a single
-/// [`mpmpc`][crate::mpmc] queue.
+/// [`mpmpc`](crate::mpmc) queue.
 pub const MAX_CONSUMERS: usize = ((1 << TAG_BITS) - NODE_SIZE + 1) / 2;
 
 /// The number of tag bits required to represent the index tag.
@@ -85,7 +85,7 @@ impl<T> Node<T> {
     }
 
     /// Allocates memory for storing a [`Node`] aligned to [`NODE_ALIGN`] and initializes it with
-    /// [`new`][Node::new].
+    /// [`new`](Node::new).
     fn alloc() -> *mut Self {
         let ptr = Self::aligned_alloc_uninit();
         unsafe {
@@ -95,7 +95,7 @@ impl<T> Node<T> {
     }
 
     /// Allocates memory for storing a [`Node`] aligned to [`NODE_ALIGN`] and initializes it with
-    /// [`with_first`][Node::with_first].
+    /// [`with_first`](Node::with_first).
     fn alloc_with(elem: T) -> *mut Self {
         let ptr = Self::aligned_alloc_uninit();
         unsafe {
@@ -104,6 +104,12 @@ impl<T> Node<T> {
         }
     }
 
+    /// Allocates memory for storing a [`Node`] aligned to [`NODE_ALIGN`] and initializes it with
+    /// [`with_tentative_first`](Node::with_tentative_first).
+    ///
+    /// # Safety
+    ///
+    /// See [`with_tentative_first`](Node::with_tentative_first).
     unsafe fn alloc_with_tentative(elem: &ManuallyDrop<T>) -> *mut Self {
         let ptr = Self::aligned_alloc_uninit();
         unsafe {
@@ -112,9 +118,10 @@ impl<T> Node<T> {
         }
     }
 
+    /// Allocates memory for storing a [`Node`] aligned to [`NODE_ALIGN`], leaving it uninitialized.
     fn aligned_alloc_uninit() -> *mut Self {
         let layout = Layout::new::<Self>().align_to(NODE_ALIGN).unwrap();
-        let ptr = unsafe { alloc::alloc(layout) } as *mut Self;
+        let ptr: *mut Self = unsafe { alloc::alloc(layout) }.cast();
         if ptr.is_null() {
             alloc::handle_alloc_error(layout);
         }
@@ -122,17 +129,39 @@ impl<T> Node<T> {
         ptr
     }
 
+    /// Iterates all slots in `node` starting from `start_idx` and checks, if each slot has been
+    /// [consumed](CONSUMED) yet.
+    ///
+    /// If any slot is found to have **not** yet been consumed, i.e., there is either a pending
+    /// produce or consume operation, the function atomically sets the [`CONTINUE`] bit in the
+    /// slot's state mask and returns without checking the remaining slots.
+    ///
+    /// If the const generic `RECLAIM` parameter is set to `true` and the function succeeds in
+    /// checking up to the last slot, the function atomically sets the appropriate bit in the node's
+    /// control block and de-allocates the block, if it determines all reclamation conditions to be
+    /// met.
+    ///
+    /// The const generic `RECLAIM` parameter should only be set to `false`, if it is certain, that
+    /// the final check can not possibly succeed.
+    ///
+    /// # Safety
+    ///
+    /// - must only be called by a single initiator thread or by threads, that detect the
+    ///   [`CONTINUE`] bit in their currently processed slot's state mask (with follow on index)
+    /// - must never be called concurrently with other threads or repeatedly
+    /// - `node` must be non-null and live
+    // FIXME: RECLAIM should default to `true` (requires const generic default parameters)
     unsafe fn check_slots_and_try_reclaim<const RECLAIM: bool>(node: *mut Self, start_idx: usize) {
         // iterate all slots from `start_idx` on and check if they have been consumed
         for slot in &(*node).slots[start_idx..] {
-            if !slot.is_consumed() && !slot.set_resume_bit() {
+            if !slot.is_consumed() && !slot.set_continue_bit() {
                 return;
             }
         }
 
-        if RECLAIM {
-            unsafe { Self::set_flag_and_try_reclaim(node, ControlBlock::DRAINED_SLOTS) };
-        }
+        // SAFETY: after all slots have been checked exactly once and were determined to be consumed
+        // it is sound to set the appropriate bit and potentially reclaim the node
+        unsafe { Self::set_flag_and_try_reclaim::<{ ControlBlock::DRAINED_SLOTS }, RECLAIM>(node) };
     }
 
     unsafe fn count_push_and_try_reclaim(node: *mut Self, final_count: Option<u32>) {
@@ -145,7 +174,9 @@ impl<T> Node<T> {
         let curr_count = (prev_mask & Self::MASK) + 1;
 
         if curr_count == final_count.unwrap_or(0) {
-            unsafe { Self::set_flag_and_try_reclaim(node, ControlBlock::TAIL_ADVANCED) };
+            unsafe {
+                Self::set_flag_and_try_reclaim::<{ ControlBlock::TAIL_ADVANCED }, true>(node)
+            };
         }
     }
 
@@ -159,13 +190,16 @@ impl<T> Node<T> {
         let curr_count = (prev_mask & Self::MASK) + 1;
 
         if curr_count == final_count.unwrap_or(0) {
-            unsafe { Self::set_flag_and_try_reclaim(node, ControlBlock::HEAD_ADVANCED) };
+            unsafe {
+                Self::set_flag_and_try_reclaim::<{ ControlBlock::HEAD_ADVANCED }, true>(node)
+            };
         }
     }
 
-    unsafe fn set_flag_and_try_reclaim(node: *mut Self, flag: u8) {
-        let flags = (*node).control.reclaim_flags.fetch_add(flag, Ordering::AcqRel);
-        if flags == ControlBlock::RECLAIMABLE {
+    // FIXME: RECLAIM should default to `true` (requires const generic default parameters)
+    unsafe fn set_flag_and_try_reclaim<const BIT: u8, const RECLAIM: bool>(node: *mut Self) {
+        let flags = (*node).control.reclaim_flags.fetch_add(BIT, Ordering::AcqRel);
+        if RECLAIM && ControlBlock::is_reclaimable::<BIT>(flags) {
             Self::dealloc(node);
         }
     }
@@ -174,11 +208,11 @@ impl<T> Node<T> {
     ///
     /// # Safety
     ///
-    /// The same safety requirements as for [`dealloc`][alloc::dealloc] apply.
-    /// In addition, `node` must point to a node that is aligned to [`NODE_ALIGN`][NODE_ALIGN].
+    /// The same safety requirements as for [`dealloc`](alloc::dealloc) apply.
+    /// In addition, `node` must point to a node that is aligned to [`NODE_ALIGN`].
     unsafe fn dealloc(node: *mut Self) {
         let layout = Layout::new::<Self>().align_to(NODE_ALIGN).unwrap();
-        alloc::dealloc(node as *mut u8, layout);
+        alloc::dealloc(node.cast(), layout);
     }
 }
 
@@ -195,10 +229,15 @@ struct ControlBlock {
 }
 
 impl ControlBlock {
+    /// The bit indicating that all slots have been checked exactly once and were determined to have
+    /// been consumed.
     const DRAINED_SLOTS: u8 = 0b001;
+    /// The bit indicating that all operations attempting to advance the queue's tail node from a
+    /// specific node have concluded.
     const TAIL_ADVANCED: u8 = 0b010;
+    /// The bit indicating that all operations attempting to advance the queue's head node from a
+    /// specific node have concluded.
     const HEAD_ADVANCED: u8 = 0b100;
-    const RECLAIMABLE: u8 = Self::DRAINED_SLOTS | Self::TAIL_ADVANCED | Self::HEAD_ADVANCED;
 
     const fn new() -> Self {
         Self {
@@ -206,6 +245,19 @@ impl ControlBlock {
             pop_count: AtomicU32::new(0),
             reclaim_flags: AtomicU8::new(0),
         }
+    }
+
+    const fn reclaimable_mask(bit: u8) -> u8 {
+        match bit {
+            Self::DRAINED_SLOTS => Self::TAIL_ADVANCED | Self::HEAD_ADVANCED,
+            Self::TAIL_ADVANCED => Self::DRAINED_SLOTS | Self::HEAD_ADVANCED,
+            Self::HEAD_ADVANCED => Self::TAIL_ADVANCED | Self::HEAD_ADVANCED,
+            _ => 0, // FIXME: const panic
+        }
+    }
+
+    fn is_reclaimable<const BIT: u8>(flags: u8) -> bool {
+        flags == Self::reclaimable_mask(BIT)
     }
 }
 
@@ -231,14 +283,20 @@ fn cas_atomic_tag_ptr_loop<T>(
     old: *mut Node<T>,
 ) -> Option<u32> {
     const REL_RLX_CAS: (Ordering, Ordering) = (Ordering::Release, Ordering::Relaxed);
+    // loop & try to CAS the ptr until the CAS succeeds
     while let Err(read) = ptr.compare_exchange(current, new, REL_RLX_CAS) {
+        // the CAS failed due to a competing CAS or FAA from another thread, but the loaded value
+        // shows, that the pointer itself has been changed (instead of only the tag), so another
+        // thread must have been successfull in exchanging the pointer
         if read.decompose_ptr() != old {
             return None;
         }
 
-        current = read
+        // update the expected value and repeat
+        current = read;
     }
 
+    // since tag values can not exceed the tag bit limit, this cast will never truncate any bits
     Some((current.decompose_tag() - NODE_SIZE) as u32)
 }
 
