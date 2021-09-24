@@ -1,7 +1,9 @@
 //! The multi-producer, single-consumer (MPSC) variant of the *looqueue* algorithm.
 
 use std::{
+    alloc,
     cell::Cell,
+    fmt,
     iter::FromIterator,
     mem::{self, ManuallyDrop},
     ptr::NonNull,
@@ -50,6 +52,7 @@ pub fn from_iter<T>(iter: impl Iterator<Item = T>) -> (Producer<T>, Consumer<T>)
 /// Producer handles may be cloned, allowing multiple threads to push elements in safe manner, but
 /// at most [`MAX_PRODUCERS`](crate::MAX_PRODUCERS) may exist at the same time
 pub struct Producer<T> {
+    /// The pointer to the reference counted queue.
     ptr: NonNull<ArcQueue<T>>,
 }
 
@@ -65,19 +68,48 @@ impl<T> Clone for Producer<T> {
     }
 }
 
+impl<T> fmt::Debug for Producer<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Producer {{ ... }}")
+    }
+}
+
 impl<T> Drop for Producer<T> {
     fn drop(&mut self) {
         // SAFETY: pointer deref is sound, since at least one live handle exists
         let is_last = unsafe { self.ptr.as_ref().counts.decrease_producer_count() };
         if is_last {
-            // SAFETY: there are now other live handles and none can be created anymore at this
+            // SAFETY: there are no other live handles and none can be created anymore at this
             // point, so the handle can be safely deallocated
-            let _ = unsafe { Box::from_raw(self.ptr.as_ptr()) };
+            mem::drop(unsafe { Box::from_raw(self.ptr.as_ptr()) });
         }
     }
 }
 
 impl<T> Producer<T> {
+    /// Attempts to unwrap and convert the queue backing this handle into an [`OwnedQueue`].
+    ///
+    /// # Errors
+    ///
+    /// Unwrapping will fail, if this handle is not the **only** live handle to the queue, in which
+    /// case the original handle is returned unaltered.
+    pub fn try_unwrap_owned(self) -> Result<OwnedQueue<T>, Self> {
+        // SAFETY: pointer deref is sound, since at least one live handle exists; the reference does
+        // not live beyond this unsafe block
+        let is_last = unsafe {
+            let arc = self.ptr.as_ref();
+            arc.counts.consumer_count() == 0 && arc.counts.producer_count() == 1
+        };
+
+        if is_last {
+            let queue = self.ptr.as_ptr();
+            mem::forget(self);
+            Ok(unsafe { ArcQueue::unwrap_owned(queue) })
+        } else {
+            Err(self)
+        }
+    }
+
     /// Returns `true` if the queue is empty.
     pub fn is_empty(&self) -> bool {
         // SAFETY: pointer deref is sound, since at least one live handle exists
@@ -91,6 +123,12 @@ impl<T> Producer<T> {
         unsafe { self.ptr.as_ref().counts.producer_count() }
     }
 
+    /// Returns the current count of live consumer handles.
+    pub fn consumer_count(&self) -> usize {
+        // SAFETY: pointer deref is sound, since at least one live handle exists
+        unsafe { self.ptr.as_ref().counts.consumer_count() }
+    }
+
     /// Pushes `elem` to the back of the queue.
     pub fn push_back(&self, elem: T) {
         // SAFETY: pointer deref is sound, since at least one live handle exists
@@ -100,6 +138,7 @@ impl<T> Producer<T> {
 
 /// A unique consumer handle to a [`mpsc`](crate::mpsc) queue.
 pub struct Consumer<T> {
+    /// The pointer to the reference counted queue.
     ptr: NonNull<ArcQueue<T>>,
 }
 
@@ -107,6 +146,12 @@ pub struct Consumer<T> {
 // allowed to "smuggle" !Send types between threads (thus requiring `T: Send`)
 unsafe impl<T: Send> Send for Consumer<T> {}
 // unsafe impl<T> !Sync for Consumer<T> {}
+
+impl<T> fmt::Debug for Consumer<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Consumer {{ ... }}")
+    }
+}
 
 impl<T> Drop for Consumer<T> {
     fn drop(&mut self) {
@@ -121,6 +166,23 @@ impl<T> Drop for Consumer<T> {
 }
 
 impl<T> Consumer<T> {
+    /// Attempts to unwrap and convert the queue backing this handle into an [`OwnedQueue`].
+    ///
+    /// # Errors
+    ///
+    /// Unwrapping will fail, if this handle is not the **only** live handle to the queue, in which
+    /// case the original handle is returned unaltered.
+    pub fn try_unwrap_owned(self) -> Result<OwnedQueue<T>, Self> {
+        // SAFETY: pointer deref is sound, since at least one live handle exists
+        if unsafe { self.ptr.as_ref().counts.producer_count() == 0 } {
+            let queue = self.ptr.as_ptr();
+            mem::forget(self);
+            Ok(unsafe { ArcQueue::unwrap_owned(queue) })
+        } else {
+            Err(self)
+        }
+    }
+
     /// Returns `true` if the queue is empty.
     pub fn is_empty(&self) -> bool {
         // SAFETY: pointer deref is sound, since at least one live handle exists
@@ -145,8 +207,21 @@ impl<T> Consumer<T> {
 /// A wrapper containing both the raw queue and its reference counters to which all producers and
 /// consumers must hold a handle.
 struct ArcQueue<T> {
+    /// The queue's producer/consumer reference counts.
     counts: RefCounts,
+    /// The raw queue itself.
     raw: RawQueue<T>,
+}
+
+impl<T> ArcQueue<T> {
+    unsafe fn unwrap_owned(queue: *mut Self) -> OwnedQueue<T> {
+        unsafe {
+            let ArcQueue { raw, .. } = queue.read();
+            alloc::dealloc(queue.cast(), alloc::Layout::new::<Self>());
+            let (head, tail) = raw.into_raw_parts();
+            OwnedQueue::from_raw_parts(head, tail)
+        }
+    }
 }
 
 struct RawQueue<T> {
@@ -300,14 +375,26 @@ impl<T> RawQueue<T> {
     ) -> Result<(), NotInserted> {
         unsafe { crate::try_advance_tail(&self.tail, &self.tail_cached, elem, tail) }
     }
+
+    fn into_raw_parts(self) -> (Cursor<T>, Cursor<T>) {
+        let cursors = self.cursors_unsync();
+        mem::forget(self);
+        cursors
+    }
+
+    fn cursors_unsync(&self) -> (Cursor<T>, Cursor<T>) {
+        let head = self.head.get();
+        let (ptr, idx) = self.tail.load(Ordering::Relaxed).decompose();
+        let tail = Cursor { ptr, idx };
+
+        (head, tail)
+    }
 }
 
 impl<T> Drop for RawQueue<T> {
     fn drop(&mut self) {
         // converts the queue into an `OwnedQueue` and drops it
-        let head = self.head.get();
-        let (ptr, idx) = self.tail.load(Ordering::Relaxed).decompose();
-        let tail = Cursor { ptr, idx };
+        let (head, tail) = self.cursors_unsync();
         mem::drop(unsafe { OwnedQueue::from_raw_parts(head, tail) });
     }
 }
@@ -363,5 +450,31 @@ mod tests {
         mem::drop(tx4);
 
         assert!(flag.get());
+    }
+
+    #[test]
+    fn test_unwrap_producer() {
+        let (tx, rx) = super::queue();
+        tx.push_back(1);
+
+        // both handles still alive, rx is dropped afterwards
+        assert!(tx.try_unwrap_owned().is_err(), "unwrapping must fail");
+        // unwrapping must succeed, since tx is already gone
+        let mut owned = rx.try_unwrap_owned().unwrap();
+        assert_eq!(owned.pop_front(), Some(1));
+        assert_eq!(owned.pop_front(), None);
+    }
+
+    #[test]
+    fn test_unwrap_consumer() {
+        let (tx, rx) = super::queue();
+        tx.push_back(1);
+
+        // both handles still alive, rx is dropped afterwards
+        assert!(rx.try_unwrap_owned().is_err(), "unwrapping must fail");
+        // unwrapping must succeed, since rx is already gone
+        let mut owned = tx.try_unwrap_owned().unwrap();
+        assert_eq!(owned.pop_front(), Some(1));
+        assert_eq!(owned.pop_front(), None);
     }
 }
