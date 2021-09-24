@@ -4,6 +4,13 @@ use crate::slot::{DropSlot, Slot};
 
 use super::{Cursor, Node};
 
+/// An owned, non-thread-safe FIFO queue that can be trivially transformed into or created from
+/// either an [`mpsc`](crate::mpsc) or an [`mpmc`](crate::mpmc) queue.
+///
+/// The implementation is fairly efficient, but should not be used as replacement for e.g. a
+/// [`VecDeque`](std::collections::VecDeque) in general.
+/// It's intended use-case is for cheap conversion from/into one of the concurrent queue types,
+/// which feature an identical internal structure.
 pub struct OwnedQueue<T> {
     head: Cursor<T>,
     tail: Cursor<T>,

@@ -2,7 +2,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Atomic reference counters for consumers and producers.
 pub(crate) struct RefCounts {
+    /// The consumer thread count.
     consumers: AtomicU32,
+    /// The producer thread count.
     producers: AtomicU32,
 }
 
