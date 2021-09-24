@@ -237,10 +237,18 @@ struct ArcQueue<T> {
 }
 
 impl<T> ArcQueue<T> {
+    /// Extracts `queue` into an [`OwnedQueue`] and de-allocates the memory at the address of the
+    /// pointer.
+    ///
+    /// The `queue` pointer must be non-null and live and there must be no other references to the
+    /// queue other than this pointer.
     unsafe fn unwrap_owned(queue: *mut Self) -> OwnedQueue<T> {
         unsafe {
+            // "extract" the contents from the heap (but keep the source intact)
             let ArcQueue { raw, .. } = queue.read();
+            // allocate the memory without dropping anything!
             alloc::dealloc(queue.cast(), alloc::Layout::new::<Self>());
+            // convert the extracted queue into an owned queue
             let (head, tail) = raw.into_raw_parts();
             OwnedQueue::from_raw_parts(head, tail)
         }
