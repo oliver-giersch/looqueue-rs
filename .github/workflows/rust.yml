@@ -1,0 +1,46 @@
+name: loo tests
+on:
+  push:
+    branches: [master]
+    tags: [v*]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+  FIXED_NIGHTLY: nightly-2021-09-24
+
+jobs:
+  test:
+    name: cargo test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+  miri:
+    name: cargo miri test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ env.FIXED_NIGHTLY }}
+          override: true
+      - name: install miri
+        run: |
+          rustup component add miri
+          cargo miri setup
+      - name: miri
+        run: cargo miri test
