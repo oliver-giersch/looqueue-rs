@@ -136,7 +136,7 @@ impl<T> Producer<T> {
     }
 }
 
-/// A unique consumer handle to a [`mpsc`](crate::mpsc) queue.
+/// A (unique) consumer handle to a [`mpsc`](crate::mpsc) queue.
 pub struct Consumer<T> {
     /// The pointer to the reference counted queue.
     ptr: NonNull<ArcQueue<T>>,
@@ -199,7 +199,7 @@ impl<T> Consumer<T> {
     /// Pops the element at the front of the queue or returns `None` if it is empty.
     pub fn pop_front(&self) -> Option<T> {
         // SAFETY: pointer deref is sound, since at least one live handle exists, since `self` is
-        // a unique handle, there can be no concurrent calls to `pop_front()`
+        // an unique handle, there can be no concurrent calls to `pop_front()`
         unsafe { self.ptr.as_ref().raw.pop_front() }
     }
 

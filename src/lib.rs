@@ -18,10 +18,10 @@ pub use crate::owned::OwnedQueue;
 
 use crate::slot::Slot;
 
-/// The maximum number of producer handles that max exist at the same time for a single
+/// The maximum number of producer handles that may exist at the same time for a single
 /// [`mpsc`](crate::mpsc) or [`mpmpc`](crate::mpmc) queue.
 pub const MAX_PRODUCERS: usize = (1 << TAG_BITS) - NODE_SIZE + 1;
-/// The maximum number of consumer handles that max exist at the same time for a single
+/// The maximum number of consumer handles that may exist at the same time for a single
 /// [`mpmpc`](crate::mpmc) queue.
 pub const MAX_CONSUMERS: usize = ((1 << TAG_BITS) - NODE_SIZE + 1) / 2;
 
