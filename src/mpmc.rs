@@ -220,6 +220,11 @@ impl<T> Consumer<T> {
         // SAFETY: pointer deref is sound, since at least one live handle exists
         unsafe { self.ptr.as_ref().raw.pop_front() }
     }
+
+    /// Returns an iterator consuming each element in the queue.
+    pub fn iter(&self) -> impl Iterator<Item = T> + '_ {
+        std::iter::from_fn(move || self.pop_front())
+    }
 }
 
 /// A wrapper containing both the raw queue and its reference counters to which all producers and
@@ -279,10 +284,10 @@ impl<T> RawQueue<T> {
                     Ordering::Release,
                     Ordering::Relaxed,
                 );
+            }
 
-                if head == tail && (idx >= NODE_SIZE || tail_idx <= idx) {
-                    return true;
-                }
+            if head == tail && (idx >= NODE_SIZE || tail_idx <= idx) {
+                return true;
             }
         }
 
@@ -458,6 +463,30 @@ mod tests {
         assert_eq!(rx.pop_front(), Some(2));
         assert_eq!(rx.pop_front(), Some(3));
         assert_eq!(rx.pop_front(), None);
+    }
+
+    #[test]
+    fn test_iter() {
+        let (tx, rx) = super::queue();
+        tx.push_back(1);
+        tx.push_back(2);
+        tx.push_back(3);
+
+        let res: Vec<_> = rx.iter().collect();
+        assert_eq!(res, &[1, 2, 3]);
+
+        tx.push_back(4);
+        tx.push_back(5);
+        tx.push_back(6);
+
+        let res: Vec<_> = rx.iter().collect();
+        // sanity/internal consistency check
+        unsafe {
+            let raw = &rx.ptr.as_ref().raw;
+            let idx = raw.head.load(std::sync::atomic::Ordering::Relaxed).decompose_tag();
+            assert_eq!(idx, 6)
+        }
+        assert_eq!(res, &[4, 5, 6]);
     }
 
     #[test]

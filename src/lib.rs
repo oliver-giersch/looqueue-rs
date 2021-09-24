@@ -251,7 +251,7 @@ impl ControlBlock {
         match bit {
             Self::DRAINED_SLOTS => Self::TAIL_ADVANCED | Self::HEAD_ADVANCED,
             Self::TAIL_ADVANCED => Self::DRAINED_SLOTS | Self::HEAD_ADVANCED,
-            Self::HEAD_ADVANCED => Self::TAIL_ADVANCED | Self::HEAD_ADVANCED,
+            Self::HEAD_ADVANCED => Self::DRAINED_SLOTS | Self::TAIL_ADVANCED,
             _ => 0, // FIXME: const panic
         }
     }

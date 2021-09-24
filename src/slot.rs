@@ -82,10 +82,10 @@ impl<T> Slot<T> {
             // (slot:x) this acquire load syncs-with the release FAA (slot:y)
             if self.state.load(Ordering::Acquire) & PRODUCER == PRODUCER {
                 // SAFETY: Since the PRODUCER bit is already set, the slot can be safely read (no
-                // data race is possible) and the NO_PRODUCER_YET bit can be set right away, as no
-                // 2-step invalidation is necessary
+                // data race is possible) and the CONSUMED_OR_INVALIDATED bit can be set right away,
+                // as no 2-step invalidation is necessary
                 let elem = unsafe { self.read_volatile() };
-                return match self.state.fetch_add(NO_PRODUCER_YET, Ordering::Release) {
+                return match self.state.fetch_add(CONSUMED_OR_INVALIDATED, Ordering::Release) {
                     // the expected/likely case
                     PRODUCER => ConsumeResult::Success { elem, resume_check: false },
                     // RESUME can only be set if there are multiple consumers

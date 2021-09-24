@@ -202,6 +202,11 @@ impl<T> Consumer<T> {
         // a unique handle, there can be no concurrent calls to `pop_front()`
         unsafe { self.ptr.as_ref().raw.pop_front() }
     }
+
+    /// Returns an iterator consuming each element in the queue.
+    pub fn iter(&self) -> impl Iterator<Item = T> + '_ {
+        std::iter::from_fn(move || self.pop_front())
+    }
 }
 
 /// A wrapper containing both the raw queue and its reference counters to which all producers and
@@ -261,10 +266,10 @@ impl<T> RawQueue<T> {
                     Ordering::Release,
                     Ordering::Relaxed,
                 );
+            }
 
-                if head.ptr == tail && tail_idx <= head.idx {
-                    return (true, head);
-                }
+            if head.ptr == tail && tail_idx <= head.idx {
+                return (true, head);
             }
         }
 
@@ -350,6 +355,7 @@ impl<T> RawQueue<T> {
 
             // read tail again to ensure that `None` is never returned after a linearized push
             if head == self.tail.load(Ordering::Acquire).decompose_ptr() {
+                // FIXME: return None before setting the HEAD_ADVANCED_BIT ???
                 return None;
             }
 
@@ -450,6 +456,48 @@ mod tests {
         mem::drop(tx4);
 
         assert!(flag.get());
+    }
+
+    #[test]
+    fn test_iter() {
+        let (tx, rx) = super::queue();
+        tx.push_back(1);
+        tx.push_back(2);
+        tx.push_back(3);
+
+        let res: Vec<_> = rx.iter().collect();
+        assert_eq!(res, &[1, 2, 3]);
+
+        tx.push_back(4);
+        tx.push_back(5);
+        tx.push_back(6);
+
+        let res: Vec<_> = rx.iter().collect();
+        // sanity/internal consistency check
+        unsafe {
+            let raw = &rx.ptr.as_ref().raw;
+            assert_eq!(raw.head.get().idx, 6);
+        }
+        assert_eq!(res, &[4, 5, 6]);
+    }
+
+    #[test]
+    fn test_full_node() {
+        const N: usize = crate::NODE_SIZE + 1;
+
+        let (tx, rx) = super::queue();
+        for i in 0..N {
+            tx.push_back(i);
+        }
+
+        let res: Vec<_> = rx.iter().collect();
+        assert_eq!(res.len(), N);
+
+        // sanity/internal consistency check
+        unsafe {
+            let raw = &rx.ptr.as_ref().raw;
+            assert_eq!(raw.head.get().idx, 1);
+        }
     }
 
     #[test]
