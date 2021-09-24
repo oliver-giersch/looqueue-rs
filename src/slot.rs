@@ -18,16 +18,16 @@ const UNINIT: u8 = 0;
 
 /// The state bit indicating a producer/consumer detecting it should call
 /// `Node::check_slots_and_try_reclaim` (resume it) from the next slot on.
-const CONTINUE: u8 = 0b0001;
+const CONTINUE_CHECK: u8 = 0b0001;
 /// The state bit set by a producer AFTER writing an element into the slot, marking it as ready.
-const PRODUCED: u8 = 0b0010;
+const PRODUCER: u8 = 0b0010;
 /// The state bit set by a consumer AFTER having invalidated or consumed the slot.
-const VISITED: u8 = 0b0100;
+const CONSUMED_OR_INVALIDATED: u8 = 0b0100;
 /// The state bit set by a consumer BEFORE attempting to invalidate the slot.
-const NOT_YET_PRODUCED: u8 = 0b1000;
+const NO_PRODUCER_YET: u8 = 0b1000;
 
 /// The bit mask indicating a slot has been successfully consumed.
-const CONSUMED: u8 = PRODUCED | VISITED;
+const CONSUMED: u8 = PRODUCER | CONSUMED_OR_INVALIDATED;
 
 impl<T> Slot<T> {
     /// Creates a new uninitialized slot.
@@ -37,7 +37,7 @@ impl<T> Slot<T> {
 
     /// Creates a new slot initialized with `elem`.
     pub(crate) const fn with(elem: T) -> Self {
-        Self { inner: UnsafeCell::new(MaybeUninit::new(elem)), state: AtomicU8::new(PRODUCED) }
+        Self { inner: UnsafeCell::new(MaybeUninit::new(elem)), state: AtomicU8::new(PRODUCER) }
     }
 
     /// Creates a new slot tentatively initialized with `elem`.
@@ -49,7 +49,7 @@ impl<T> Slot<T> {
     pub(crate) unsafe fn with_tentative(elem: &ManuallyDrop<T>) -> Self {
         Self {
             inner: UnsafeCell::new(MaybeUninit::new(ptr::read(&**elem))),
-            state: AtomicU8::new(PRODUCED),
+            state: AtomicU8::new(PRODUCER),
         }
     }
 
@@ -63,33 +63,33 @@ impl<T> Slot<T> {
         self.state.load(Ordering::Acquire) & CONSUMED == CONSUMED
     }
 
-    /// Atomically sets the [`CONTINUE`] bit in the slots state mask.
+    /// Atomically sets the [`CONTINUE_CHECK`] bit in the slots state mask.
     ///
     /// # Safety
     ///
     /// Must only be called during the *check slots* procedure and after determining, the slot has
     /// not yet been consumed.
     pub(crate) unsafe fn set_continue_bit(&self) -> bool {
-        self.state.fetch_add(CONTINUE, Ordering::Relaxed) & CONSUMED == CONSUMED
+        self.state.fetch_add(CONTINUE_CHECK, Ordering::Relaxed) & CONSUMED == CONSUMED
     }
 
     pub(crate) unsafe fn try_consume(&self) -> ConsumeResult<T> {
-        const CONTINUE_OR_PRODUCED: u8 = CONTINUE | PRODUCED;
+        const CONTINUE_OR_PRODUCER: u8 = CONTINUE_CHECK | PRODUCER;
 
         // loop a bounded number of steps in order to allow the corresponding producer to complete
         // its corresponding call to `write_tentative`
         for _ in 0..16 {
             // (slot:x) this acquire load syncs-with the release FAA (slot:y)
-            if self.state.load(Ordering::Acquire) & PRODUCED == PRODUCED {
-                // SAFETY: Since the PRODUCED bit is already set, the slot can be safely read (no
-                // data race is possible) and the NOT_YET_PRODUCED bit can be set right away, as no
+            if self.state.load(Ordering::Acquire) & PRODUCER == PRODUCER {
+                // SAFETY: Since the PRODUCER bit is already set, the slot can be safely read (no
+                // data race is possible) and the NO_PRODUCER_YET bit can be set right away, as no
                 // 2-step invalidation is necessary
                 let elem = unsafe { self.read_volatile() };
-                return match self.state.fetch_add(NOT_YET_PRODUCED, Ordering::Release) {
+                return match self.state.fetch_add(NO_PRODUCER_YET, Ordering::Release) {
                     // the expected/likely case
-                    PRODUCED => ConsumeResult::Success { elem, resume_check: false },
+                    PRODUCER => ConsumeResult::Success { elem, resume_check: false },
                     // RESUME can only be set if there are multiple consumers
-                    CONTINUE_OR_PRODUCED => ConsumeResult::Success { elem, resume_check: true },
+                    CONTINUE_OR_PRODUCER => ConsumeResult::Success { elem, resume_check: true },
                     // SAFETY: no other combination of state bits is possible at this point
                     _ => unsafe { std::hint::unreachable_unchecked() },
                 };
@@ -101,11 +101,20 @@ impl<T> Slot<T> {
         unsafe { self.try_consume_unlikely() }
     }
 
+    /// Consumes the element from this slot without performing any checks.
+    ///
+    /// # Safety
+    ///
+    /// The slot must have been written to before.
     pub(crate) unsafe fn consume_unsync_unchecked(&mut self) -> T {
         self.state.store(CONSUMED, Ordering::Relaxed);
         (*self.inner.get()).as_ptr().read()
     }
 
+    /// Writes `elem` into the slot (used only by `OwnedQueue`).
+    ///
+    /// Should only be called once, since already written elements will be silently overwritten and
+    /// leaked.
     pub(crate) fn write_unsync(&mut self, elem: T) {
         *self = Self::with(elem);
     }
@@ -114,15 +123,15 @@ impl<T> Slot<T> {
         // if a slot has already been visited and marked for abandonment AND halted at in an attempt
         // to check if all slots have yet been consumed, a producer must abandon that slot and
         // resume the slot check procedure
-        const PRODUCER_RESUMES: u8 = NOT_YET_PRODUCED | VISITED | CONTINUE;
+        const PRODUCER_RESUMES: u8 = NO_PRODUCER_YET | CONSUMED_OR_INVALIDATED | CONTINUE_CHECK;
 
         // write the element's bits tentatively into the slot, i.e. the write may yet be revoked, in
         // which case the source must remain valid
         self.write_volative(elem);
         // after the slot is initialized, set the WRITER bit in the slot's state field and assess,
         // if any other bits had been set by other (consumer) threads
-        match self.state.fetch_add(PRODUCED, Ordering::Release) {
-            UNINIT | CONTINUE => WriteResult::Success,
+        match self.state.fetch_add(PRODUCER, Ordering::Release) {
+            UNINIT | CONTINUE_CHECK => WriteResult::Success,
             PRODUCER_RESUMES => WriteResult::Abandon { resume_check: true },
             _ => WriteResult::Abandon { resume_check: false },
         }
@@ -130,25 +139,26 @@ impl<T> Slot<T> {
 
     #[cold]
     unsafe fn try_consume_unlikely(&self) -> ConsumeResult<T> {
-        const CONSUMER_RESUMES_A: u8 = PRODUCED | CONTINUE;
-        const CONSUMER_RESUMES_B: u8 = NOT_YET_PRODUCED | CONSUMER_RESUMES_A;
+        // FIXME: could be replaced with inline const
+        const CONSUMER_RESUMES_A: u8 = PRODUCER | CONTINUE_CHECK;
+        const CONSUMER_RESUMES_B: u8 = NO_PRODUCER_YET | CONSUMER_RESUMES_A;
 
-        // set the NOT_YET_PRODUCED bit, which leads to all subsequent write attempts to fail, but
-        // check, if the PRODUCED bit has been set before by now
-        let (res, mut resume_check) =
-            match self.state.fetch_add(NOT_YET_PRODUCED, Ordering::Acquire) {
-                // the slot has now been initialized, so the slot can now be consumed
-                PRODUCED => (Some(self.read_volatile()), false),
-                // the slot has now been initialized, but the slot check must be resumed
-                CONSUMER_RESUMES_A => (Some(self.read_volatile()), true),
-                // the slot has still not been initialized, so it must truly be abandoned now
-                _ => (None, false),
-            };
+        // set the NO_PRODUCER_YET bit, which leads to all subsequent write attempts to fail, but
+        // check, if the PRODUCER bit has been set before by now
+        let (res, mut resume_check) = match self.state.fetch_add(NO_PRODUCER_YET, Ordering::Acquire)
+        {
+            // the slot has now been initialized, so the slot can now be consumed
+            PRODUCER => (Some(self.read_volatile()), false),
+            // the slot has now been initialized, but the slot check must be resumed
+            CONSUMER_RESUMES_A => (Some(self.read_volatile()), true),
+            // the slot has still not been initialized, so it must truly be abandoned now
+            _ => (None, false),
+        };
 
-        // set the VISISTED bit to mark the consume operation as completed; whether a write has
-        // occurred or not is no longer relevant at this point
-        let state = self.state.fetch_add(VISITED, Ordering::Release);
-        // if the CONTINUE bit was not previously set but is now, the slot check must now be resumed
+        // set the CONSUMED_OR_INVALIDATED bit to mark the consume operation as completed; whether
+        // a write has occurred or not is no longer relevant at this point
+        let state = self.state.fetch_add(CONSUMED_OR_INVALIDATED, Ordering::Release);
+        // if the CONTINUE_CHECK bit was not previously set but is now, the slot check must now be resumed
         if !resume_check && state == CONSUMER_RESUMES_B {
             resume_check = true;
         }
