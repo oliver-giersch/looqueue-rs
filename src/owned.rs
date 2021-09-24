@@ -1,4 +1,4 @@
-use std::{iter::FromIterator, mem, ptr, sync::atomic::Ordering};
+use std::{fmt, iter::FromIterator, mem, ptr, sync::atomic::Ordering};
 
 use crate::slot::{DropSlot, Slot};
 
@@ -16,12 +16,19 @@ pub struct OwnedQueue<T> {
     tail: Cursor<T>,
 }
 
+// SAFETY: Send/Sync are trivially sound, since there is no interior mutability
 unsafe impl<T: Send> Send for OwnedQueue<T> {}
 unsafe impl<T: Sync> Sync for OwnedQueue<T> {}
 
 impl<T> Default for OwnedQueue<T> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<T> fmt::Debug for OwnedQueue<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "OwnedQueue {{ ... }}")
     }
 }
 
@@ -79,13 +86,13 @@ impl<T> OwnedQueue<T> {
         // the cursor to the current head slot
         let Cursor { ptr: head, idx } = self.head;
         if idx < crate::NODE_SIZE {
-            let res = unsafe { (*head).slots[idx].consume_unsync_unchecked() };
+            let res = unsafe { (*head).slots[idx].consume_unchecked_unsync() };
             self.head.idx += 1;
             Some(res)
         } else {
             let res = unsafe {
                 let next = (*head).next.load(Ordering::Relaxed);
-                let res = (*next).slots[0].consume_unsync_unchecked();
+                let res = (*next).slots[0].consume_unchecked_unsync();
                 self.head = Cursor { ptr: next, idx: 1 };
                 Node::dealloc(head);
 
@@ -116,6 +123,7 @@ impl<T> OwnedQueue<T> {
 impl<T> Drop for OwnedQueue<T> {
     fn drop(&mut self) {
         while !self.head.ptr.is_null() {
+            // consider only elements that have not yet been popped
             let Cursor { ptr: curr, idx } = self.head;
             if mem::needs_drop::<T>() {
                 // the highest index is either NODE_SIZE of the tail index, once the loop reaches
@@ -156,9 +164,11 @@ impl<T> FromIterator<T> for OwnedQueue<T> {
         for elem in iter {
             let idx = queue.tail.idx;
             if idx < crate::NODE_SIZE {
+                // write elem into first free slot of current tail node
                 unsafe { (*queue.tail.ptr).slots[idx].write_unsync(elem) };
                 queue.tail.idx += 1;
             } else {
+                // allocate & append a new tail node
                 let next = Node::alloc_with(elem);
                 unsafe { *(*queue.tail.ptr).next.get_mut() = next };
                 queue.tail = Cursor { ptr: next, idx: 1 };

@@ -271,27 +271,44 @@ impl<T> RawQueue<T> {
 
     /// Returns `true` if the queue is empty.
     fn is_empty(&self) -> bool {
-        let (head, idx) = self.head.fetch_add(0, Ordering::Relaxed).decompose();
+        // on x86-64 and as long as LLVM isn't trying to be overly smart and "optimize" this by
+        // compiling it as `mov` instruction, this should be compiled down to a `lock; xadd`
+        // instruction, which can *dramatically* speed up pop operations under contention
+        // (this is because the `lock; xadd` places the cache line in which `head` resides into
+        // an "owned" state for this CPU, which means the subsequent it will likely still be in that
+        // state when the subsequent `fetch_add(1)` is executed a few lines later.
+        // Also, since `head` is never read by an ordinary `mov` instruction by any thread, the
+        // cache line is never in the "shared" state, which reduces the amount of work required by
+        // the cache-coherence protocol, in effect the cache line ping-pongs from one CPUs ownership
+        // to another's)
+        let head: Cursor<_> = self.head.fetch_add(0, Ordering::Relaxed).decompose().into();
         let tail_cached = self.tail_cached.load(Ordering::Acquire);
 
-        if head == tail_cached {
-            let (tail, tail_idx) = self.tail.load(Ordering::Relaxed).decompose();
-            // if cached tail is lagging behind, update it
-            if tail_cached != tail {
-                let _ = self.tail_cached.compare_exchange(
-                    tail_cached,
-                    tail,
-                    Ordering::Release,
-                    Ordering::Relaxed,
-                );
-            }
-
-            if head == tail && (idx >= NODE_SIZE || tail_idx <= idx) {
-                return true;
-            }
+        // if the cached tail points to a different node, head and tail CAN NOT point to the same
+        // node, even if the cached tail is lagging behind and the queue must be non-empty
+        if head.ptr != tail_cached {
+            return false;
         }
 
-        false
+        // head and tail (potentially) point to the same node, so we need to compare their
+        // indices, which is undesirable because it requires loading the potentially highly
+        // contended tail pointer
+        let tail: Cursor<_> = self.tail.load(Ordering::Relaxed).decompose().into();
+        // check if the cached tail is lagging behind and help updating it, if it is
+        if tail.ptr != tail_cached {
+            let _ = self.tail_cached.compare_exchange(
+                tail_cached,
+                tail.ptr,
+                Ordering::Release,
+                Ordering::Relaxed,
+            );
+
+            // since the "real" tail is already ahead, the queue must be non-empty as well
+            return false;
+        }
+
+        // check, if the tail index is ahead of the head index
+        tail.idx <= head.idx
     }
 
     /// Pushes `elem` to the back of the queue.
@@ -443,6 +460,7 @@ impl<T> RawQueue<T> {
 
 impl<T> Drop for RawQueue<T> {
     fn drop(&mut self) {
+        // converts the queue into an `OwnedQueue` and drops it
         let (head, tail) = self.cursors_unsync();
         mem::drop(unsafe { OwnedQueue::from_raw_parts(head, tail) });
     }

@@ -51,7 +51,7 @@ impl<T> Node<T> {
     /// The bitmask to extract the current count (lower bits) of concluded operations.
     const MASK: u32 = 0xFFFF;
 
-    const SLOT: Slot<T> = Slot::new();
+    const SLOT: Slot<T> = Slot::new(); // FIXME: use inline const once stable
 
     /// Creates a new node of uninitialized slots.
     const fn new() -> Self {
@@ -164,39 +164,73 @@ impl<T> Node<T> {
         unsafe { Self::set_flag_and_try_reclaim::<{ ControlBlock::DRAINED_SLOTS }, RECLAIM>(node) };
     }
 
+    /// Increases the current count (low 16 bit) of concluded (slow-path/advance tail) push
+    /// operations and sets the final count (high 16 bit), if `final_count` is not `None`.
+    ///
+    /// If the operation determines, that the respective push operation is the final operation
+    /// to access the node it is subsequently de-allocated.
+    ///
+    /// # Safety
+    ///
+    /// The given `node` pointer must be..
+    ///
+    /// 1. allocated by the same allocator used to de-allocate it (currently the global allocator)
+    /// 2. live & non-null
+    /// 3. correctly aligned to [`NODE_ALIGN`](crate::NODE_ALIGN)
     unsafe fn count_push_and_try_reclaim(node: *mut Self, final_count: Option<u32>) {
         let add = match final_count {
+            // set the final count AND increment the current count
             Some(final_count) => (final_count << Self::SHIFT) + 1,
+            // only increment the current count
             None => 1,
         };
 
+        // SAFETY: node deref is required to be safe by fn safety invariants
         let prev_mask = unsafe { (*node).control.push_count.fetch_add(add, Ordering::Relaxed) };
         let curr_count = (prev_mask & Self::MASK) + 1;
 
-        if curr_count == final_count.unwrap_or(0) {
+        // use either provided final count or the final count extracted from the loaded mask
+        if curr_count == final_count.unwrap_or_else(|| prev_mask >> Self::SHIFT) {
             unsafe {
                 Self::set_flag_and_try_reclaim::<{ ControlBlock::TAIL_ADVANCED }, true>(node)
             };
         }
     }
 
+    /// Increases the current count (low 16 bit) of concluded (slow-path/advance head) pop
+    /// operations and sets the final count (high 16 bit), if `final_count` is not `None`.
+    ///
+    /// If the operation determines, that the respective pop operation is the final operation
+    /// to access the node it is subsequently de-allocated.
+    ///
+    /// # Safety
+    ///
+    /// The given `node` pointer must be..
+    ///
+    /// 1. allocated by the same allocator used to de-allocate it (currently the global allocator)
+    /// 2. live & non-null
+    /// 3. correctly aligned to [`NODE_ALIGN`]
     unsafe fn count_pop_and_try_reclaim(node: *mut Self, final_count: Option<u32>) {
         let add = match final_count {
+            // set the final count AND increment the current count
             Some(final_count) => (final_count << Self::SHIFT) + 1,
+            // only increment the current count
             None => 1,
         };
 
+        // SAFETY: node deref is required to be safe by fn safety invariants
         let prev_mask = unsafe { (*node).control.pop_count.fetch_add(add, Ordering::Relaxed) };
         let curr_count = (prev_mask & Self::MASK) + 1;
 
-        if curr_count == final_count.unwrap_or(0) {
+        // use either provided final count or the final count extracted from the loaded mask
+        if curr_count == final_count.unwrap_or_else(|| prev_mask >> Self::SHIFT) {
             unsafe {
                 Self::set_flag_and_try_reclaim::<{ ControlBlock::HEAD_ADVANCED }, true>(node)
             };
         }
     }
 
-    // FIXME: RECLAIM should default to `true` (requires const generic default parameters)
+    // FIXME: RECLAIM should default to `true` (requires stable const generic default parameters)
     unsafe fn set_flag_and_try_reclaim<const BIT: u8, const RECLAIM: bool>(node: *mut Self) {
         let flags = (*node).control.reclaim_flags.fetch_add(BIT, Ordering::AcqRel);
         if RECLAIM && ControlBlock::is_reclaimable::<BIT>(flags) {
@@ -265,6 +299,12 @@ impl ControlBlock {
 struct Cursor<T> {
     ptr: *mut Node<T>,
     idx: usize,
+}
+
+impl<T> From<(*mut Node<T>, usize)> for Cursor<T> {
+    fn from((ptr, idx): (*mut Node<T>, usize)) -> Self {
+        Cursor { ptr, idx }
+    }
 }
 
 impl<T> Clone for Cursor<T> {

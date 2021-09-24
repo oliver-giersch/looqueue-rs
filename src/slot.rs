@@ -106,7 +106,7 @@ impl<T> Slot<T> {
     /// # Safety
     ///
     /// The slot must have been written to before.
-    pub(crate) unsafe fn consume_unsync_unchecked(&mut self) -> T {
+    pub(crate) unsafe fn consume_unchecked_unsync(&mut self) -> T {
         self.state.store(CONSUMED, Ordering::Relaxed);
         (*self.inner.get()).as_ptr().read()
     }
