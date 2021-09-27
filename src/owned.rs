@@ -35,7 +35,7 @@ impl<T> fmt::Debug for OwnedQueue<T> {
 impl<T> OwnedQueue<T> {
     /// Creates a new empty queue.
     pub fn new() -> Self {
-        let ptr = Node::alloc();
+        let ptr = Node::aligned_alloc();
         Self { head: Cursor { ptr, idx: 0 }, tail: Cursor { ptr, idx: 0 } }
     }
 
@@ -71,7 +71,7 @@ impl<T> OwnedQueue<T> {
             unsafe { (*ptr).slots[idx].write_unsync(elem) };
             self.tail.idx += 1;
         } else {
-            let node = Node::alloc_with(elem);
+            let node = Node::aligned_alloc_with(elem);
             unsafe { (*ptr).next.store(node, Ordering::Relaxed) };
             self.tail = Cursor { ptr: node, idx: 1 };
         }
@@ -158,10 +158,9 @@ impl<T> FromIterator<T> for OwnedQueue<T> {
     where
         I: IntoIterator<Item = T>,
     {
-        let iter = iter.into_iter();
         let mut queue = Self::new();
 
-        for elem in iter {
+        for elem in iter.into_iter() {
             let idx = queue.tail.idx;
             if idx < crate::NODE_SIZE {
                 // write elem into first free slot of current tail node
@@ -169,8 +168,17 @@ impl<T> FromIterator<T> for OwnedQueue<T> {
                 queue.tail.idx += 1;
             } else {
                 // allocate & append a new tail node
-                let next = Node::alloc_with(elem);
-                unsafe { *(*queue.tail.ptr).next.get_mut() = next };
+                let next = Node::aligned_alloc_with(elem);
+                // SAFETY: the tail pointer can be safely de-referenced and the node mutated, since
+                // there no other mutations are possible concurrently, there are no mutable
+                // references and the node is still alive
+                unsafe {
+                    // set the node's next pointer
+                    *(*queue.tail.ptr).next.get_mut() = next;
+                    // set the TAIL_ADVANCED bit to allow this node to be reclaimed once it is drained
+                    (*queue.tail.ptr).control.mark_tail_advanced()
+                }
+
                 queue.tail = Cursor { ptr: next, idx: 1 };
             }
         }

@@ -102,8 +102,11 @@ impl<T> Producer<T> {
         };
 
         if is_last {
+            // extract the pointer to the queue
             let queue = self.ptr.as_ptr();
+            // forget the handle to prevent its `drop` method to run
             mem::forget(self);
+            // SAFETY: unwrapping is safe, since the handle is gone and `queue` is the final pointer
             Ok(unsafe { ArcQueue::unwrap_owned(queue) })
         } else {
             Err(self)
@@ -189,8 +192,11 @@ impl<T> Consumer<T> {
         };
 
         if is_last {
+            // extract the pointer to the queue
             let queue = self.ptr.as_ptr();
+            // forget the handle to prevent its `drop` method to run
             mem::forget(self);
+            // SAFETY: unwrapping is safe, since the handle is gone and `queue` is the final pointer
             Ok(unsafe { ArcQueue::unwrap_owned(queue) })
         } else {
             Err(self)
@@ -240,11 +246,13 @@ impl<T> ArcQueue<T> {
     /// Extracts `queue` into an [`OwnedQueue`] and de-allocates the memory at the address of the
     /// pointer.
     ///
-    /// The `queue` pointer must be non-null and live and there must be no other references to the
+    /// # Safety
+    ///
+    /// The `queue` pointer must be non-null, live and there must be no other references to the
     /// queue other than this pointer.
     unsafe fn unwrap_owned(queue: *mut Self) -> OwnedQueue<T> {
         unsafe {
-            // "extract" the contents from the heap (but keep the source intact)
+            // "extract" the contents from the heap (but keep the source memory intact)
             let ArcQueue { raw, .. } = queue.read();
             // allocate the memory without dropping anything!
             alloc::dealloc(queue.cast(), alloc::Layout::new::<Self>());
@@ -269,7 +277,8 @@ struct RawQueue<T> {
 impl<T> RawQueue<T> {
     /// Returns a new `RawQueue`.
     fn new() -> Self {
-        let node = Node::alloc();
+        // allocate an empty, aligned initial node
+        let node = Node::aligned_alloc();
         Self {
             head: AtomicTagPtr::new(TagPtr::compose(node, 0)),
             tail: AtomicTagPtr::new(TagPtr::compose(node, 0)),
@@ -363,6 +372,7 @@ impl<T> RawQueue<T> {
     /// Must not be called concurrently, i.e. only by one single consumer.
     unsafe fn pop_front(&self) -> Option<T> {
         loop {
+            // exit early and without incrementing the pop index if the queue is empty
             if self.is_empty() {
                 return None;
             }
@@ -379,7 +389,9 @@ impl<T> RawQueue<T> {
                     // the slot was successfully consumed and the retrieved element can be returned
                     ConsumeResult::Success { elem, resume_check } => {
                         if resume_check {
-                            unsafe { Node::check_slots_and_try_reclaim::<true>(head, 0) };
+                            // SAFETY: the check can be safely resumed, since the consume has
+                            // detected the CONTINUE bit in the current slot
+                            unsafe { Node::check_slots_and_try_reclaim::<true>(head, idx + 1) };
                         }
 
                         return Some(elem);
@@ -388,6 +400,8 @@ impl<T> RawQueue<T> {
                     // completed in time
                     ConsumeResult::Abandon { resume_check } => {
                         if resume_check {
+                            // SAFETY: the check can be safely resumed, since the consume has
+                            // detected the CONTINUE bit in the current slot
                             unsafe { Node::check_slots_and_try_reclaim::<true>(head, idx + 1) };
                         }
 
@@ -398,6 +412,7 @@ impl<T> RawQueue<T> {
 
             // the first "slow path" call initiates the check-slots procedure
             if idx == NODE_SIZE {
+                // SAFETY: since each idx is unique, it's safe to initiate (start_idx = 0) the check
                 unsafe { Node::check_slots_and_try_reclaim::<false>(head, 0) };
             }
 

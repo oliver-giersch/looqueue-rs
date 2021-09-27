@@ -86,7 +86,7 @@ impl<T> Node<T> {
 
     /// Allocates memory for storing a [`Node`] aligned to [`NODE_ALIGN`] and initializes it with
     /// [`new`](Node::new).
-    fn alloc() -> *mut Self {
+    fn aligned_alloc() -> *mut Self {
         let ptr = Self::aligned_alloc_uninit();
         unsafe {
             ptr.write(Self::new());
@@ -96,7 +96,7 @@ impl<T> Node<T> {
 
     /// Allocates memory for storing a [`Node`] aligned to [`NODE_ALIGN`] and initializes it with
     /// [`with_first`](Node::with_first).
-    fn alloc_with(elem: T) -> *mut Self {
+    fn aligned_alloc_with(elem: T) -> *mut Self {
         let ptr = Self::aligned_alloc_uninit();
         unsafe {
             ptr.write(Self::with_first(elem));
@@ -110,7 +110,7 @@ impl<T> Node<T> {
     /// # Safety
     ///
     /// See [`with_tentative_first`](Node::with_tentative_first).
-    unsafe fn alloc_with_tentative(elem: &ManuallyDrop<T>) -> *mut Self {
+    unsafe fn aligned_alloc_with_tentative(elem: &ManuallyDrop<T>) -> *mut Self {
         let ptr = Self::aligned_alloc_uninit();
         unsafe {
             ptr.write(Self::with_tentative_first(elem));
@@ -178,7 +178,7 @@ impl<T> Node<T> {
     /// 2. live & non-null
     /// 3. correctly aligned to [`NODE_ALIGN`](crate::NODE_ALIGN)
     unsafe fn count_push_and_try_reclaim(node: *mut Self, final_count: Option<u32>) {
-        let add = match final_count {
+        let mask = match final_count {
             // set the final count AND increment the current count
             Some(final_count) => (final_count << Self::SHIFT) + 1,
             // only increment the current count
@@ -186,11 +186,13 @@ impl<T> Node<T> {
         };
 
         // SAFETY: node deref is required to be safe by fn safety invariants
-        let prev_mask = unsafe { (*node).control.push_count.fetch_add(add, Ordering::Relaxed) };
+        let prev_mask = unsafe { (*node).control.push_count.fetch_add(mask, Ordering::Relaxed) };
         let curr_count = (prev_mask & Self::MASK) + 1;
 
         // use either provided final count or the final count extracted from the loaded mask
         if curr_count == final_count.unwrap_or_else(|| prev_mask >> Self::SHIFT) {
+            // SAFETY: curr_count is never zero, it can only be equal to the final count once that
+            // has been set, i.e. when all counted operations are finished
             unsafe {
                 Self::set_flag_and_try_reclaim::<{ ControlBlock::TAIL_ADVANCED }, true>(node)
             };
@@ -211,7 +213,7 @@ impl<T> Node<T> {
     /// 2. live & non-null
     /// 3. correctly aligned to [`NODE_ALIGN`]
     unsafe fn count_pop_and_try_reclaim(node: *mut Self, final_count: Option<u32>) {
-        let add = match final_count {
+        let mask = match final_count {
             // set the final count AND increment the current count
             Some(final_count) => (final_count << Self::SHIFT) + 1,
             // only increment the current count
@@ -219,7 +221,7 @@ impl<T> Node<T> {
         };
 
         // SAFETY: node deref is required to be safe by fn safety invariants
-        let prev_mask = unsafe { (*node).control.pop_count.fetch_add(add, Ordering::Relaxed) };
+        let prev_mask = unsafe { (*node).control.pop_count.fetch_add(mask, Ordering::Relaxed) };
         let curr_count = (prev_mask & Self::MASK) + 1;
 
         // use either provided final count or the final count extracted from the loaded mask
@@ -234,7 +236,9 @@ impl<T> Node<T> {
     unsafe fn set_flag_and_try_reclaim<const BIT: u8, const RECLAIM: bool>(node: *mut Self) {
         let flags = (*node).control.reclaim_flags.fetch_add(BIT, Ordering::AcqRel);
         if RECLAIM && ControlBlock::is_reclaimable::<BIT>(flags) {
-            Self::dealloc(node);
+            // SAFETY: when all three bits are set there can be no further operations that may
+            // access the node
+            unsafe { Self::dealloc(node) };
         }
     }
 
@@ -273,6 +277,7 @@ impl ControlBlock {
     /// specific node have concluded.
     const HEAD_ADVANCED: u8 = 0b100;
 
+    /// Creates a new control block.
     const fn new() -> Self {
         Self {
             push_count: AtomicU32::new(0),
@@ -281,17 +286,25 @@ impl ControlBlock {
         }
     }
 
+    /// Returns the bit mask returned by a `fetch_add` of `bit` (i.e. the previous value),
+    /// indicating that a node can be reclaimed.
     const fn reclaimable_mask(bit: u8) -> u8 {
         match bit {
             Self::DRAINED_SLOTS => Self::TAIL_ADVANCED | Self::HEAD_ADVANCED,
             Self::TAIL_ADVANCED => Self::DRAINED_SLOTS | Self::HEAD_ADVANCED,
             Self::HEAD_ADVANCED => Self::DRAINED_SLOTS | Self::TAIL_ADVANCED,
-            _ => 0, // FIXME: const panic
+            _ => u8::MAX, // FIXME: const panic
         }
     }
 
+    /// Returns `true` if a node can be reclaimed after a `fetch_add` of `BIT` on the node's reclaim
+    /// flags has previously returned `flags`.
     fn is_reclaimable<const BIT: u8>(flags: u8) -> bool {
         flags == Self::reclaimable_mask(BIT)
+    }
+
+    fn mark_tail_advanced(&mut self) {
+        self.reclaim_flags.store(Self::TAIL_ADVANCED, Ordering::Relaxed)
     }
 }
 
@@ -358,7 +371,7 @@ unsafe fn try_advance_tail<T>(
     let next = (*tail).next.load(Ordering::Relaxed);
     if next.is_null() {
         // the next pointer is still `null`, attempt to append a newly allocated node
-        let node = Node::alloc_with_tentative(elem);
+        let node = Node::aligned_alloc_with_tentative(elem);
         // try to exchange (CAS) the tail node's next pointer
         let (res, new_tail) =
             match (*tail).next.compare_exchange(next, node, Ordering::Release, Ordering::Relaxed) {

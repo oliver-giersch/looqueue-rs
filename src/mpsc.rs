@@ -102,8 +102,11 @@ impl<T> Producer<T> {
         };
 
         if is_last {
+            // extract the pointer to the queue
             let queue = self.ptr.as_ptr();
+            // forget the handle to prevent its `drop` method to run
             mem::forget(self);
+            // SAFETY: unwrapping is safe, since the handle is gone and `queue` is the final pointer
             Ok(unsafe { ArcQueue::unwrap_owned(queue) })
         } else {
             Err(self)
@@ -175,8 +178,11 @@ impl<T> Consumer<T> {
     pub fn try_unwrap_owned(self) -> Result<OwnedQueue<T>, Self> {
         // SAFETY: pointer deref is sound, since at least one live handle exists
         if unsafe { self.ptr.as_ref().counts.producer_count() == 0 } {
+            // extract the pointer to the queue
             let queue = self.ptr.as_ptr();
+            // forget the handle to prevent its `drop` method to run
             mem::forget(self);
+            // SAFETY: unwrapping is safe, since the handle is gone and `queue` is the final pointer
             Ok(unsafe { ArcQueue::unwrap_owned(queue) })
         } else {
             Err(self)
@@ -222,7 +228,9 @@ impl<T> ArcQueue<T> {
     /// Extracts `queue` into an [`OwnedQueue`] and de-allocates the memory at the address of the
     /// pointer.
     ///
-    /// The `queue` pointer must be non-null and live and there must be no other references to the
+    /// # Safety
+    ///
+    /// The `queue` pointer must be non-null, live and there must be no other references to the
     /// queue other than this pointer.
     unsafe fn unwrap_owned(queue: *mut Self) -> OwnedQueue<T> {
         unsafe {
@@ -251,7 +259,8 @@ struct RawQueue<T> {
 impl<T> RawQueue<T> {
     /// Returns a new `RawQueue`.
     fn new() -> Self {
-        let node = Node::alloc();
+        // allocate an empty, aligned initial node
+        let node = Node::aligned_alloc();
         Self {
             head: Cell::new(Cursor { ptr: node, idx: 0 }),
             tail: AtomicTagPtr::new(TagPtr::compose(node, 0)),
@@ -337,6 +346,7 @@ impl<T> RawQueue<T> {
     /// Must not be called concurrently, i.e. only by one single consumer.
     unsafe fn pop_front(&self) -> Option<T> {
         loop {
+            // exit early and without incrementing the pop index if the queue is empty
             let (is_empty, Cursor { ptr: head, idx }) = self.check_empty();
             if is_empty {
                 return None;
@@ -371,8 +381,8 @@ impl<T> RawQueue<T> {
             }
 
             // read tail again to ensure that `None` is never returned after a linearized push
+            // (the head node must only be reclaimed after it has been advanced)
             if head == self.tail.load(Ordering::Acquire).decompose_ptr() {
-                // FIXME: return None before setting the HEAD_ADVANCED_BIT ???
                 return None;
             }
 
@@ -399,6 +409,8 @@ impl<T> RawQueue<T> {
         unsafe { crate::try_advance_tail(&self.tail, &self.tail_cached, elem, tail) }
     }
 
+    /// Leaks the queue and returns it's head and tail (pointer, index) tuples in their raw
+    /// representation.
     fn into_raw_parts(self) -> (Cursor<T>, Cursor<T>) {
         let cursors = self.cursors_unsync();
         mem::forget(self);
@@ -541,5 +553,23 @@ mod tests {
         let mut owned = tx.try_unwrap_owned().unwrap();
         assert_eq!(owned.pop_front(), Some(1));
         assert_eq!(owned.pop_front(), None);
+    }
+
+    #[test]
+    fn test_multi_nodes() {
+        const N: usize = crate::NODE_SIZE * 100;
+
+        let (_, rx) = super::from_iter(0..N);
+        for i in 0..N {
+            assert_eq!(rx.pop_front(), Some(i));
+        }
+
+        assert_eq!(rx.pop_front(), None);
+
+        // sanity/internal consistency check
+        unsafe {
+            let raw = &rx.ptr.as_ref().raw;
+            assert_eq!(raw.head.get().idx, crate::NODE_SIZE);
+        }
     }
 }
