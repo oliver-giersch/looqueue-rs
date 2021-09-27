@@ -1,4 +1,9 @@
-use std::{fmt, iter::FromIterator, mem, ptr, sync::atomic::Ordering};
+use std::{
+    fmt,
+    iter::{self, FromIterator},
+    mem, ptr,
+    sync::atomic::Ordering,
+};
 
 use crate::slot::{DropSlot, Slot};
 
@@ -103,6 +108,16 @@ impl<T> OwnedQueue<T> {
         }
     }
 
+    /// Returns an iterator over the queue.
+    pub fn iter(&self) -> Iter<'_, T> {
+        Iter { curr: self.head, tail: &self.tail }
+    }
+
+    /// Returns a mutable iterator over the queue.
+    pub fn iter_mut(&mut self) -> IterMut<'_, T> {
+        IterMut { curr: self.head, tail: &mut self.tail }
+    }
+
     /// Leaks the queue and it returns its (raw) head and tail (pointer, index) tuples.
     pub(crate) fn into_raw_parts(self) -> (Cursor<T>, Cursor<T>) {
         let parts = (self.head, self.tail);
@@ -187,9 +202,77 @@ impl<T> FromIterator<T> for OwnedQueue<T> {
     }
 }
 
+/// An iterator over an [`OwnedQueue`].
+pub struct Iter<'a, T> {
+    curr: Cursor<T>,
+    tail: &'a Cursor<T>,
+}
+
+impl<'a, T> Iterator for Iter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        unsafe { self.curr.next_unchecked(self.tail, &mut None).as_ref() }
+    }
+}
+
+impl<T> iter::FusedIterator for Iter<'_, T> {}
+
+/// A mutable iterator over an [`OwnedQueue`].
+pub struct IterMut<'a, T> {
+    curr: Cursor<T>,
+    tail: &'a mut Cursor<T>,
+}
+
+impl<'a, T> Iterator for IterMut<'a, T> {
+    type Item = &'a mut T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        unsafe { self.curr.next_unchecked(self.tail, &mut None).as_mut() }
+    }
+}
+
+impl<T> iter::FusedIterator for IterMut<'_, T> {}
+
+/// A consuming iterator over an [`OwnedQueue`].
+pub struct IntoIter<T> {
+    // the iterator wraps the queue as-is, so the queue must be dropped correctly and without leaks
+    // when the iterator itself gets dropped
+    queue: OwnedQueue<T>,
+}
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        unsafe {
+            let mut prev = None;
+            let ptr = self.queue.head.next_unchecked(&self.queue.tail, &mut prev);
+            let elem = (!ptr.is_null()).then(|| ptr.read());
+
+            if let Some(node) = prev {
+                Node::dealloc(node);
+            }
+
+            elem
+        }
+    }
+}
+
+impl<T> iter::FusedIterator for IntoIter<T> {}
+
+impl<T> IntoIterator for OwnedQueue<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter { queue: self }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::iter::FromIterator;
+    use std::{cell::Cell, iter::FromIterator};
 
     use crate::NODE_SIZE;
 
@@ -276,6 +359,56 @@ mod tests {
         }
 
         assert_eq!(queue.pop_front(), None);
+    }
+
+    #[test]
+    fn test_iter() {
+        const N: usize = crate::NODE_SIZE * 2;
+
+        let queue = OwnedQueue::from_iter(0..N);
+        let mut iter = queue.iter();
+        for i in 0..N {
+            assert_eq!(iter.next(), Some(&i));
+        }
+
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_into_iter() {
+        const N: usize = crate::NODE_SIZE * 2;
+
+        let mut iter = OwnedQueue::from_iter(0..N).into_iter();
+        for i in 0..N {
+            assert_eq!(iter.next(), Some(i));
+        }
+
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_into_iter_abortive() {
+        const N: usize = crate::NODE_SIZE * 2;
+
+        struct Canary<'a>(&'a Cell<usize>);
+        impl Drop for Canary<'_> {
+            fn drop(&mut self) {
+                let curr = self.0.get();
+                self.0.set(curr + 1);
+            }
+        }
+
+        let count = Cell::new(0);
+        let mut iter = OwnedQueue::from_iter((0..N).map(|_| Canary(&count))).into_iter();
+        for _ in 0..(N / 2) {
+            assert!(iter.next().is_some());
+        }
+
+        assert_eq!(count.get(), N / 2);
+
+        std::mem::drop(iter);
+
+        assert_eq!(count.get(), N);
     }
 
     #[test]

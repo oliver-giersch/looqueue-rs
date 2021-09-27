@@ -93,7 +93,7 @@ impl<T> Producer<T> {
     ///
     /// Unwrapping will fail, if this handle is not the **only** live handle to the queue, in which
     /// case the original handle is returned unaltered.
-    pub fn try_unwrap_owned(self) -> Result<OwnedQueue<T>, Self> {
+    pub fn try_unwrap(self) -> Result<OwnedQueue<T>, Self> {
         // SAFETY: pointer deref is sound, since at least one live handle exists; the reference does
         // not live beyond this unsafe block
         let is_last = unsafe {
@@ -183,7 +183,7 @@ impl<T> Consumer<T> {
     ///
     /// Unwrapping will fail, if this handle is not the **only** live handle to the queue, in which
     /// case the original handle is returned unaltered.
-    pub fn try_unwrap_owned(self) -> Result<OwnedQueue<T>, Self> {
+    pub fn try_unwrap(self) -> Result<OwnedQueue<T>, Self> {
         // SAFETY: pointer deref is sound, since at least one live handle exists; the reference does
         // not live beyond this unsafe block
         let is_last = unsafe {
@@ -349,6 +349,8 @@ impl<T> RawQueue<T> {
                     // the write was unsuccessful and the slot has to be abandoned
                     WriteResult::Abandon { resume_check } => {
                         if resume_check {
+                            // SAFETY: the check can be safely resumed, since the consume has
+                            // detected the CONTINUE bit in the current slot
                             Node::check_slots_and_try_reclaim::<true>(tail, idx + 1);
                         }
 
@@ -536,9 +538,9 @@ mod tests {
         tx.push_back(1);
 
         // both handles still alive, rx is dropped afterwards
-        assert!(tx.try_unwrap_owned().is_err(), "unwrapping must fail");
+        assert!(tx.try_unwrap().is_err(), "unwrapping must fail");
         // unwrapping must succeed, since tx is already gone
-        let mut owned = rx.try_unwrap_owned().unwrap();
+        let mut owned = rx.try_unwrap().unwrap();
         assert_eq!(owned.pop_front(), Some(1));
         assert_eq!(owned.pop_front(), None);
     }
@@ -549,9 +551,9 @@ mod tests {
         tx.push_back(1);
 
         // both handles still alive, rx is dropped afterwards
-        assert!(rx.try_unwrap_owned().is_err(), "unwrapping must fail");
+        assert!(rx.try_unwrap().is_err(), "unwrapping must fail");
         // unwrapping must succeed, since rx is already gone
-        let mut owned = tx.try_unwrap_owned().unwrap();
+        let mut owned = tx.try_unwrap().unwrap();
         assert_eq!(owned.pop_front(), Some(1));
         assert_eq!(owned.pop_front(), None);
     }

@@ -328,6 +328,31 @@ impl<T> Clone for Cursor<T> {
 
 impl<T> Copy for Cursor<T> {}
 
+impl<T> Cursor<T> {
+    /// Iterates over the pointers to each slot as if all nodes were laid out continously in memory.
+    unsafe fn next_unchecked(&mut self, end: &Self, prev: &mut Option<*mut Node<T>>) -> *mut T {
+        if self.ptr.is_null() || (self.ptr == end.ptr && self.idx >= end.idx) {
+            return ptr::null_mut();
+        }
+
+        // SAFETY: as long as self and end are valid cursors, `self.ptr` can be de-referenced
+        let elem = unsafe { (*self.ptr).slots[self.idx].as_mut_ptr() };
+
+        if self.idx < NODE_SIZE - 1 {
+            self.idx += 1;
+            elem
+        } else {
+            let curr = self.ptr;
+            let next = (*curr).next.load(Ordering::Relaxed);
+
+            *self = Cursor { ptr: next, idx: 0 };
+            *prev = Some(curr);
+
+            elem
+        }
+    }
+}
+
 #[inline(always)]
 fn cas_atomic_tag_ptr_loop<T>(
     ptr: &AtomicTagPtr<Node<T>>,

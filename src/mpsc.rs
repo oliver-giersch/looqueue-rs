@@ -93,7 +93,18 @@ impl<T> Producer<T> {
     ///
     /// Unwrapping will fail, if this handle is not the **only** live handle to the queue, in which
     /// case the original handle is returned unaltered.
-    pub fn try_unwrap_owned(self) -> Result<OwnedQueue<T>, Self> {
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # fn main() -> Result<(), loo::mpsc::Producer<usize>> {
+    /// let (tx, _) = loo::mpsc::from_iter(0..10); // consumer is dropped immediately
+    /// let queue = tx.try_unwrap()?;
+    /// assert_eq!(queue.iter().count(), 10);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn try_unwrap(self) -> Result<OwnedQueue<T>, Self> {
         // SAFETY: pointer deref is sound, since at least one live handle exists; the reference does
         // not live beyond this unsafe block
         let is_last = unsafe {
@@ -175,7 +186,18 @@ impl<T> Consumer<T> {
     ///
     /// Unwrapping will fail, if this handle is not the **only** live handle to the queue, in which
     /// case the original handle is returned unaltered.
-    pub fn try_unwrap_owned(self) -> Result<OwnedQueue<T>, Self> {
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # fn main() -> Result<(), loo::mpsc::Producer<usize>> {
+    /// let (_, rx) = loo::mpsc::from_iter(0..10); // producer is dropped immediately
+    /// let queue = rx.try_unwrap()?;
+    /// assert_eq!(queue.iter().count(), 10);
+    /// # Ok(())
+    /// # }
+    /// ```    
+    pub fn try_unwrap(self) -> Result<OwnedQueue<T>, Self> {
         // SAFETY: pointer deref is sound, since at least one live handle exists
         if unsafe { self.ptr.as_ref().counts.producer_count() == 0 } {
             // extract the pointer to the queue
@@ -530,14 +552,24 @@ mod tests {
     }
 
     #[test]
+    fn test_unwrap() {
+        let (tx, _) = super::queue();
+        tx.push_back(1);
+
+        let mut iter = tx.try_unwrap().unwrap().into_iter();
+        assert_eq!(iter.next(), Some(1));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
     fn test_unwrap_producer() {
         let (tx, rx) = super::queue();
         tx.push_back(1);
 
         // both handles still alive, rx is dropped afterwards
-        assert!(tx.try_unwrap_owned().is_err(), "unwrapping must fail");
+        assert!(tx.try_unwrap().is_err(), "unwrapping must fail");
         // unwrapping must succeed, since tx is already gone
-        let mut owned = rx.try_unwrap_owned().unwrap();
+        let mut owned = rx.try_unwrap().unwrap();
         assert_eq!(owned.pop_front(), Some(1));
         assert_eq!(owned.pop_front(), None);
     }
@@ -548,9 +580,9 @@ mod tests {
         tx.push_back(1);
 
         // both handles still alive, rx is dropped afterwards
-        assert!(rx.try_unwrap_owned().is_err(), "unwrapping must fail");
+        assert!(rx.try_unwrap().is_err(), "unwrapping must fail");
         // unwrapping must succeed, since rx is already gone
-        let mut owned = tx.try_unwrap_owned().unwrap();
+        let mut owned = tx.try_unwrap().unwrap();
         assert_eq!(owned.pop_front(), Some(1));
         assert_eq!(owned.pop_front(), None);
     }
