@@ -1,9 +1,4 @@
-use std::{
-    fmt,
-    iter::{self, FromIterator},
-    mem, ptr,
-    sync::atomic::Ordering,
-};
+use std::{fmt, iter, mem, ptr, sync::atomic::Ordering};
 
 use crate::slot::{DropSlot, Slot};
 
@@ -51,22 +46,7 @@ impl<T> OwnedQueue<T> {
 
     /// Returns the length of the queue.
     pub fn len(&self) -> usize {
-        if self.head.ptr == self.tail.ptr {
-            self.tail.idx - self.head.idx
-        } else {
-            let mut len = crate::NODE_SIZE - self.head.idx;
-            let mut curr = self.head.ptr;
-            loop {
-                curr = unsafe { (*curr).next.load(Ordering::Relaxed) };
-                if curr == self.tail.ptr {
-                    break;
-                }
-
-                len += crate::NODE_SIZE;
-            }
-
-            len + self.tail.idx
-        }
+        unsafe { Span { start: &self.head, end: &self.tail }.len() }
     }
 
     /// Pushes `elem` to the back of the queue.
@@ -168,7 +148,7 @@ impl<T> Drop for OwnedQueue<T> {
     }
 }
 
-impl<T> FromIterator<T> for OwnedQueue<T> {
+impl<T> iter::FromIterator<T> for OwnedQueue<T> {
     fn from_iter<I>(iter: I) -> Self
     where
         I: IntoIterator<Item = T>,
@@ -208,11 +188,28 @@ pub struct Iter<'a, T> {
     tail: &'a Cursor<T>,
 }
 
+impl<T> Clone for Iter<'_, T> {
+    fn clone(&self) -> Self {
+        Self { curr: self.curr, tail: self.tail }
+    }
+}
+
 impl<'a, T> Iterator for Iter<'a, T> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
         unsafe { self.curr.next_unchecked(self.tail, &mut None).as_ref() }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.len();
+        (len, Some(len))
+    }
+}
+
+impl<T> iter::ExactSizeIterator for Iter<'_, T> {
+    fn len(&self) -> usize {
+        unsafe { Span { start: &self.curr, end: self.tail }.len() }
     }
 }
 
@@ -229,6 +226,17 @@ impl<'a, T> Iterator for IterMut<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         unsafe { self.curr.next_unchecked(self.tail, &mut None).as_mut() }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.len();
+        (len, Some(len))
+    }
+}
+
+impl<T> iter::ExactSizeIterator for IterMut<'_, T> {
+    fn len(&self) -> usize {
+        unsafe { Span { start: &self.curr, end: self.tail }.len() }
     }
 }
 
@@ -257,6 +265,17 @@ impl<T> Iterator for IntoIter<T> {
             elem
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.queue.len();
+        (len, Some(len))
+    }
+}
+
+impl<T> iter::ExactSizeIterator for IntoIter<T> {
+    fn len(&self) -> usize {
+        self.queue.len()
+    }
 }
 
 impl<T> iter::FusedIterator for IntoIter<T> {}
@@ -267,6 +286,32 @@ impl<T> IntoIterator for OwnedQueue<T> {
 
     fn into_iter(self) -> Self::IntoIter {
         IntoIter { queue: self }
+    }
+}
+
+struct Span<'a, T> {
+    start: &'a Cursor<T>,
+    end: &'a Cursor<T>,
+}
+
+impl<T> Span<'_, T> {
+    unsafe fn len(&self) -> usize {
+        if self.start.ptr == self.end.ptr {
+            self.end.idx - self.start.idx
+        } else {
+            let mut len = crate::NODE_SIZE - self.start.idx;
+            let mut curr = self.start.ptr;
+            loop {
+                curr = unsafe { (*curr).next.load(Ordering::Relaxed) };
+                if curr == self.end.ptr {
+                    break;
+                }
+
+                len += crate::NODE_SIZE;
+            }
+
+            len + self.end.idx
+        }
     }
 }
 

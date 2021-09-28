@@ -228,7 +228,7 @@ impl<T> Consumer<T> {
     }
 
     /// Returns an iterator consuming each element in the queue.
-    pub fn iter(&self) -> impl Iterator<Item = T> + '_ {
+    pub fn drain(&self) -> impl Iterator<Item = T> + '_ {
         std::iter::from_fn(move || self.pop_front())
     }
 }
@@ -515,14 +515,14 @@ mod tests {
         tx.push_back(2);
         tx.push_back(3);
 
-        let res: Vec<_> = rx.iter().collect();
+        let res: Vec<_> = rx.drain().collect();
         assert_eq!(res, &[1, 2, 3]);
 
         tx.push_back(4);
         tx.push_back(5);
         tx.push_back(6);
 
-        let res: Vec<_> = rx.iter().collect();
+        let res: Vec<_> = rx.drain().collect();
         // sanity/internal consistency check
         unsafe {
             let raw = &rx.ptr.as_ref().raw;
