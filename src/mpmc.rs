@@ -509,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn test_iter() {
+    fn test_drain() {
         let (tx, rx) = super::queue();
         tx.push_back(1);
         tx.push_back(2);

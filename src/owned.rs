@@ -420,6 +420,19 @@ mod tests {
     }
 
     #[test]
+    fn test_iter_len() {
+        const N: usize = 78;
+
+        let queue = OwnedQueue::from_iter(0..N);
+        let mut iter = queue.iter();
+        for i in 0..crate::NODE_SIZE {
+            assert_eq!(iter.next(), Some(&i));
+        }
+
+        assert_eq!(iter.len(), N - crate::NODE_SIZE);
+    }
+
+    #[test]
     fn test_into_iter() {
         const N: usize = crate::NODE_SIZE * 2;
 
@@ -451,6 +464,7 @@ mod tests {
 
         assert_eq!(count.get(), N / 2);
 
+        // dropping the iter must also correctly drop all remaining elements
         std::mem::drop(iter);
 
         assert_eq!(count.get(), N);

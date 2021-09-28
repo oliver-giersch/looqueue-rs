@@ -26,9 +26,9 @@ impl RefCounts {
     ///
     /// Panics, if the new count would exceed `max_consumers`.
     pub(crate) fn increase_consumer_count(&self, max_consumers: usize) {
-        let prev = self.consumers.fetch_add(1, Ordering::AcqRel);
+        let prev = self.consumers.fetch_add(1, Ordering::Relaxed);
         if prev as usize >= max_consumers {
-            self.consumers.fetch_sub(1, Ordering::AcqRel);
+            self.consumers.fetch_sub(1, Ordering::Relaxed);
             panic!(
                 "attempted to increase consumer count beyond safe limit of {} threads",
                 max_consumers
@@ -54,9 +54,9 @@ impl RefCounts {
     ///
     /// Panics, if the new count would exceed `max_producers`.
     pub(crate) fn increase_producer_count(&self, max_producers: usize) {
-        let prev = self.producers.fetch_add(1, Ordering::AcqRel);
+        let prev = self.producers.fetch_add(1, Ordering::Relaxed);
         if prev as usize >= max_producers {
-            self.producers.fetch_sub(1, Ordering::AcqRel);
+            self.producers.fetch_sub(1, Ordering::Relaxed);
             panic!(
                 "attempted to increase producer count beyond safe limit of {} threads",
                 max_producers
