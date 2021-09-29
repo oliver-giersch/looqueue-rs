@@ -112,7 +112,7 @@ mod slot;
 use std::{
     alloc::{self, Layout},
     mem::ManuallyDrop,
-    ptr::{self},
+    ptr,
     sync::atomic::{AtomicPtr, AtomicU32, AtomicU8, Ordering},
 };
 
@@ -128,16 +128,47 @@ pub const MAX_PRODUCERS: usize = (1 << TAG_BITS) - NODE_SIZE + 1;
 pub const MAX_CONSUMERS: usize = ((1 << TAG_BITS) - NODE_SIZE + 1) / 2;
 
 /// The number of tag bits required to represent the index tag.
-const TAG_BITS: usize = 10;
+const TAG_BITS: usize = NodeSize::Small.properties().tag_bits;
 /// The number of elements (slots) in each node.
-const NODE_SIZE: usize = 64;
+const NODE_SIZE: usize = NodeSize::Small.properties().size;
 /// The memory alignment required for each node to have sufficient `TAG_BITS` in each node pointer.
-const NODE_ALIGN: usize = 1 << TAG_BITS;
+const NODE_ALIGN: usize = NodeSize::Small.properties().alignment();
 
 type AtomicTagPtr<T> = tagptr::AtomicTagPtr<T, TAG_BITS>;
 type TagPtr<T> = tagptr::TagPtr<T, TAG_BITS>;
 
+// TODO: parametrize all queue/from_iter constructors with this enum
+// TODO: alternatively, use at type level
+#[allow(unused)]
+enum NodeSize {
+    Small,  // e.g. 64
+    Medium, // e.g. 128
+    Large,  // e.g. 1024
+}
+
+impl NodeSize {
+    const fn properties(&self) -> NodeProperties {
+        match self {
+            Self::Small => NodeProperties { tag_bits: 12, size: 64 },
+            Self::Medium => NodeProperties { tag_bits: 12, size: 128 },
+            Self::Large => NodeProperties { tag_bits: 12, size: 1024 },
+        }
+    }
+}
+
+struct NodeProperties {
+    tag_bits: usize,
+    size: usize,
+}
+
+impl NodeProperties {
+    const fn alignment(&self) -> usize {
+        1 << self.tag_bits
+    }
+}
+
 /// An array-node which forms the building block for the linked-list based queues.
+// TODO: Node<T, const S: NodeSize = NodeSize::Small>
 struct Node<T> {
     /// The array of elements (slots) and their respective state.
     slots: [Slot<T>; NODE_SIZE],
@@ -334,6 +365,10 @@ impl<T> Node<T> {
         }
     }
 
+    /// Sets the const generic `BIT` flag in the `node`'s control block.
+    ///
+    /// When `RECLAIM` is `true` it then de-allocates the node, if it has become reclaimable after
+    /// setting the flag.
     // FIXME: RECLAIM should default to `true` (requires stable const generic default parameters)
     unsafe fn set_flag_and_try_reclaim<const BIT: u8, const RECLAIM: bool>(node: *mut Self) {
         let flags = (*node).control.reclaim_flags.fetch_add(BIT, Ordering::AcqRel);
@@ -541,3 +576,5 @@ unsafe fn try_advance_tail<T>(
 
 /// A type indicating that a append-tail operation has failed to insert the desired element.
 struct NotInserted;
+/// A type indicating that a advance-head operation has failed due to there not being a next node.
+struct NoNextNode;

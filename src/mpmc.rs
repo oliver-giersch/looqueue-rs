@@ -10,8 +10,8 @@ use std::{
 use crate::{
     refcount::RefCounts,
     slot::{ConsumeResult, WriteResult},
-    AtomicTagPtr, Cursor, Node, NotInserted, OwnedQueue, TagPtr, MAX_CONSUMERS, MAX_PRODUCERS,
-    NODE_SIZE,
+    AtomicTagPtr, Cursor, NoNextNode, Node, NotInserted, OwnedQueue, TagPtr, MAX_CONSUMERS,
+    MAX_PRODUCERS, NODE_SIZE,
 };
 
 /// Creates a new concurrent multi-producer, multi-consumer (MPMC) queue and returns (cloneable)
@@ -412,25 +412,36 @@ impl<T> RawQueue<T> {
                 };
             }
 
-            // the first "slow path" call initiates the check-slots procedure
-            if idx == NODE_SIZE {
-                // SAFETY: since each idx is unique, it's safe to initiate (start_idx = 0) the check
-                unsafe { Node::check_slots_and_try_reclaim::<false>(head, 0) };
-            }
-
             // attempt to advance head to its successor node and retry, if there is one
-            match self.try_advance_head(current, head) {
+            match self.try_advance_head(current, head, idx) {
                 Ok(_) => continue,
                 Err(_) => return None,
             }
         }
     }
 
+    /// Attempts to advance the queue's head to its successor node.
+    ///
+    /// This method is marked as **cold** exempted from inlining to keep this relatively rarely
+    /// executed code out of the fast path and reduce the fast path's instruction cache impact.
+    ///
+    /// # Errors
+    ///
+    /// Fails, if there is no next node yet.
+    #[inline(never)]
+    #[cold]
     unsafe fn try_advance_head(
         &self,
         mut current: TagPtr<Node<T>>,
         head: *mut Node<T>,
+        idx: usize,
     ) -> Result<(), NoNextNode> {
+        // the first "slow path" call initiates the check-slots procedure
+        if idx == NODE_SIZE {
+            // SAFETY: since each idx is unique, it's safe to initiate (start_idx = 0) the check
+            unsafe { Node::check_slots_and_try_reclaim::<false>(head, 0) };
+        }
+
         // read tail again to ensure that `None` is never returned after a linearized push
         if head == self.tail.load(Ordering::Acquire).decompose_ptr() {
             Node::count_pop_and_try_reclaim(head, None);
@@ -449,6 +460,8 @@ impl<T> RawQueue<T> {
         Ok(())
     }
 
+    #[inline(never)]
+    #[cold]
     unsafe fn try_advance_tail(
         &self,
         elem: &ManuallyDrop<T>,
@@ -490,8 +503,6 @@ impl<T> Drop for RawQueue<T> {
         mem::drop(unsafe { OwnedQueue::from_raw_parts(head, tail) });
     }
 }
-
-struct NoNextNode;
 
 #[cfg(test)]
 mod tests {

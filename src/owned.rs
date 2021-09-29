@@ -289,6 +289,7 @@ impl<T> IntoIterator for OwnedQueue<T> {
     }
 }
 
+/// A span of connected nodes.s
 struct Span<'a, T> {
     start: &'a Cursor<T>,
     end: &'a Cursor<T>,

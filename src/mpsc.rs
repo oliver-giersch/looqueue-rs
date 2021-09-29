@@ -13,8 +13,8 @@ use std::{
 use crate::{
     refcount::RefCounts,
     slot::{ConsumeResult, WriteResult},
-    AtomicTagPtr, ControlBlock, Cursor, Node, NotInserted, OwnedQueue, TagPtr, MAX_PRODUCERS,
-    NODE_SIZE,
+    AtomicTagPtr, ControlBlock, Cursor, NoNextNode, Node, NotInserted, OwnedQueue, TagPtr,
+    MAX_PRODUCERS, NODE_SIZE,
 };
 
 /// Creates a new concurrent multi-producer, single-consumer (MPSC) queue and returns a (cloneable)
@@ -391,31 +391,42 @@ impl<T> RawQueue<T> {
                 }
             }
 
-            // the first "slow path" call initiates the check-slots procedure
-            if idx == NODE_SIZE {
-                // increment the idx for a final time to ensure this branch is only called once
-                // and function can be called again, if the there is no next node yet
-                self.head.set(Cursor { ptr: head, idx: idx + 1 });
-                // the check can never succeede to reclaim the node, because the pop operation
-                // itself is not yet accounted for (i.e., the HEAD_ADVANCED bit is not yet set),
-                // hence the method is called with `RECLAIM = false`
-                unsafe { Node::check_slots_and_try_reclaim::<false>(head, 0) };
-            }
-
-            // read tail again to ensure that `None` is never returned after a linearized push
-            // (the head node must only be reclaimed after it has been advanced)
-            if head == self.tail.load(Ordering::Acquire).decompose_ptr() {
-                return None;
-            }
-
-            // next does not have to be checked for null, since it was already determined, that
-            // head != tail, which is sufficient as next is always set before updating tail
-            unsafe {
-                let next = (*head).next.load(Ordering::Acquire);
-                self.head.set(Cursor { ptr: next, idx: 0 });
-                Node::set_flag_and_try_reclaim::<{ ControlBlock::HEAD_ADVANCED }, true>(head);
+            match self.try_advance_head(head, idx) {
+                Ok(_) => continue,
+                Err(_) => return None,
             }
         }
+    }
+
+    #[inline(never)]
+    #[cold]
+    unsafe fn try_advance_head(&self, head: *mut Node<T>, idx: usize) -> Result<(), NoNextNode> {
+        // the first "slow path" call initiates the check-slots procedure
+        if idx == NODE_SIZE {
+            // increment the idx for a final time to ensure this branch is only called once
+            // and function can be called again, if the there is no next node yet
+            self.head.set(Cursor { ptr: head, idx: idx + 1 });
+            // the check can never succeede to reclaim the node, because the pop operation
+            // itself is not yet accounted for (i.e., the HEAD_ADVANCED bit is not yet set),
+            // hence the method is called with `RECLAIM = false`
+            unsafe { Node::check_slots_and_try_reclaim::<false>(head, 0) };
+        }
+
+        // read tail again to ensure that `None` is never returned after a linearized push
+        // (the head node must only be reclaimed after it has been advanced)
+        if head == self.tail.load(Ordering::Acquire).decompose_ptr() {
+            return Err(NoNextNode);
+        }
+
+        // next does not have to be checked for null, since it was already determined, that
+        // head != tail, which is sufficient as next is always set before updating tail
+        unsafe {
+            let next = (*head).next.load(Ordering::Acquire);
+            self.head.set(Cursor { ptr: next, idx: 0 });
+            Node::set_flag_and_try_reclaim::<{ ControlBlock::HEAD_ADVANCED }, true>(head);
+        }
+
+        Ok(())
     }
 
     /// Allocates a new node with `elem` pre-inserted in its first slot and attempts to append this
@@ -423,6 +434,8 @@ impl<T> RawQueue<T> {
     ///
     /// If appending succeeds, an `Ok` result is returned and ownership of `elem` is transferred to
     /// the queue.
+    #[inline(never)]
+    #[cold]
     unsafe fn try_advance_tail(
         &self,
         elem: &ManuallyDrop<T>,
