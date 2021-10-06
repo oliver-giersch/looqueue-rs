@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    refcount::RefCounts,
+    refcount::{DropResult, RefCounts},
     slot::{ConsumeResult, WriteResult},
     AtomicTagPtr, ControlBlock, Cursor, NoNextNode, Node, NotInserted, OwnedQueue, TagPtr,
     MAX_PRODUCERS, NODE_SIZE,
@@ -76,13 +76,8 @@ impl<T> fmt::Debug for Producer<T> {
 
 impl<T> Drop for Producer<T> {
     fn drop(&mut self) {
-        // SAFETY: pointer deref is sound, since at least one live handle exists
-        let is_last = unsafe { self.ptr.as_ref().counts.decrease_producer_count() };
-        if is_last {
-            // SAFETY: there are no other live handles and none can be created anymore at this
-            // point, so the handle can be safely deallocated
-            mem::drop(unsafe { Box::from_raw(self.ptr.as_ptr()) });
-        }
+        // SAFETY: can never be called more than once
+        let _ = unsafe { self.drop_explicit() };
     }
 }
 
@@ -148,6 +143,24 @@ impl<T> Producer<T> {
         // SAFETY: pointer deref is sound, since at least one live handle exists
         unsafe { self.ptr.as_ref().raw.push_back(elem) }
     }
+
+    /// Drops this handle without consuming it and returns a result indicating how many other
+    /// handles still remain
+    ///
+    /// # Safety
+    ///
+    /// This method must be called at most once and the handle must not be used again after.
+    pub unsafe fn drop_explicit(&mut self) -> Option<DropResult> {
+        // SAFETY: pointer deref is sound, since at least one live handle exists
+        let res = unsafe { self.ptr.as_ref().counts.decrease_producer_count() };
+        if let Some(DropResult::LastOfAny) = &res {
+            // SAFETY: there are no other live handles and none can be created anymore at this
+            // point, so the handle can be safely deallocated
+            mem::drop(unsafe { Box::from_raw(self.ptr.as_ptr()) });
+        }
+
+        res
+    }
 }
 
 /// A (unique) consumer handle to a [`mpsc`](crate::mpsc) queue.
@@ -169,13 +182,8 @@ impl<T> fmt::Debug for Consumer<T> {
 
 impl<T> Drop for Consumer<T> {
     fn drop(&mut self) {
-        // SAFETY: pointer deref is sound, since at least one live handle exists
-        let is_last = unsafe { self.ptr.as_ref().counts.decrease_consumer_count() };
-        if is_last {
-            // SAFETY: there are now other live handles and none can be created anymore at this
-            // point, so the handle can be safely deallocated
-            mem::drop(unsafe { Box::from_raw(self.ptr.as_ptr()) });
-        }
+        // SAFETY: can never be called more than once
+        let _ = unsafe { self.drop_explicit() };
     }
 }
 
@@ -234,6 +242,24 @@ impl<T> Consumer<T> {
     /// Returns an iterator consuming each element in the queue.
     pub fn drain(&self) -> impl Iterator<Item = T> + '_ {
         std::iter::from_fn(move || self.pop_front())
+    }
+
+    /// Drops this handle without consuming it and returns a result indicating how many other
+    /// handles still remain
+    ///
+    /// # Safety
+    ///
+    /// This method must be called at most once and the handle must not be used again after.
+    pub unsafe fn drop_explicit(&mut self) -> Option<DropResult> {
+        // SAFETY: pointer deref is sound, since at least one live handle exists
+        let res = unsafe { self.ptr.as_ref().counts.decrease_consumer_count() };
+        if let Some(DropResult::LastOfAny) = &res {
+            // SAFETY: there are no other live handles and none can be created anymore at this
+            // point, so the handle can be safely deallocated
+            mem::drop(unsafe { Box::from_raw(self.ptr.as_ptr()) });
+        }
+
+        res
     }
 }
 
@@ -305,7 +331,7 @@ impl<T> RawQueue<T> {
         // head and tail (potentially) point to the same node, so we need to compare their
         // indices, which is undesirable because it requires loading the potentially highly
         // contended tail pointer
-        let tail: Cursor<_> = self.tail.load(Ordering::Relaxed).decompose().into();
+        let tail: Cursor<_> = self.tail.0.load(Ordering::Relaxed).decompose().into();
         // check if the cached tail is lagging behind and help updating it, if it is
         if tail.ptr != tail_cached {
             let _ = self.tail_cached.compare_exchange(
@@ -334,7 +360,7 @@ impl<T> RawQueue<T> {
         let elem = ManuallyDrop::new(elem);
         loop {
             // increment the current tail's associated index
-            let (tail, idx) = self.tail.fetch_add(1, Ordering::Acquire).decompose();
+            let (tail, idx) = self.tail.0.fetch_add(1, Ordering::Acquire).decompose();
             if idx < NODE_SIZE {
                 // a valid index into the node's slot array was exclusively reserved by this thread,
                 // so we tentatively write `elem` into the reserved slot and assess the success of
@@ -414,7 +440,7 @@ impl<T> RawQueue<T> {
 
         // read tail again to ensure that `None` is never returned after a linearized push
         // (the head node must only be reclaimed after it has been advanced)
-        if head == self.tail.load(Ordering::Acquire).decompose_ptr() {
+        if head == self.tail.0.load(Ordering::Acquire).decompose_ptr() {
             return Err(NoNextNode);
         }
 
@@ -454,7 +480,7 @@ impl<T> RawQueue<T> {
 
     fn cursors_unsync(&self) -> (Cursor<T>, Cursor<T>) {
         let head = self.head.get();
-        let (ptr, idx) = self.tail.load(Ordering::Relaxed).decompose();
+        let (ptr, idx) = self.tail.0.load(Ordering::Relaxed).decompose();
         let tail = Cursor { ptr, idx };
 
         (head, tail)

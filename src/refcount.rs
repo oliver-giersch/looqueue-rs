@@ -1,5 +1,17 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
+/// A result indicating how many handles to a queue remain after dropping a producer or consumer.
+///
+/// The `LastOfKind` result indicates that, e.g., the dropped producer handle was the final producer
+/// but there are still one or more remaining consumer handles.
+/// The `LastOfAny` result indicates that the dropped handle was the final one and that the queue
+/// has been de-allocated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DropResult {
+    LastOfKind,
+    LastOfAny,
+}
+
 /// Atomic reference counters for consumers and producers.
 pub(crate) struct RefCounts {
     /// The consumer thread count.
@@ -36,11 +48,19 @@ impl RefCounts {
         }
     }
 
-    /// Decreases the consumer thread counter and returns `true`, if **both** counters have reached
-    /// zero.
-    pub(crate) fn decrease_consumer_count(&self) -> bool {
+    /// Decreases the consumer thread counter and returns a result indicating how many producers
+    /// and consumers still exist.
+    ///
+    /// If `None` is returned, there are still live producers **and** consumers.
+    pub(crate) fn decrease_consumer_count(&self) -> Option<DropResult> {
         let prev = self.consumers.fetch_sub(1, Ordering::AcqRel);
-        prev == 1 && (self.producers.load(Ordering::Acquire) == 0)
+        let is_last_consumer = prev == 1;
+
+        match (is_last_consumer, is_last_consumer && self.producers.load(Ordering::Acquire) == 0) {
+            (true, false) => Some(DropResult::LastOfKind),
+            (true, true) => Some(DropResult::LastOfAny),
+            (false, _) => None,
+        }
     }
 
     /// Returns the current number of producer threads.
@@ -64,10 +84,18 @@ impl RefCounts {
         }
     }
 
-    /// Decreases the producer thread counter and returns `true`, if **both** counters have reached
-    /// zero.
-    pub(crate) fn decrease_producer_count(&self) -> bool {
+    /// Decreases the producer thread counter and returns a result indicating how many producers
+    /// and consumers still exist.
+    ///
+    /// If `None` is returned, there are still live producers **and** consumers.
+    pub(crate) fn decrease_producer_count(&self) -> Option<DropResult> {
         let prev = self.producers.fetch_sub(1, Ordering::AcqRel);
-        prev == 1 && (self.consumers.load(Ordering::Acquire) == 0)
+        let is_last_producer = prev == 1;
+
+        match (is_last_producer, is_last_producer && self.consumers.load(Ordering::Acquire) == 0) {
+            (true, false) => Some(DropResult::LastOfKind),
+            (true, true) => Some(DropResult::LastOfAny),
+            (false, _) => None,
+        }
     }
 }

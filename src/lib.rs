@@ -117,6 +117,7 @@ use std::{
 };
 
 pub use crate::owned::OwnedQueue;
+pub use crate::refcount::DropResult;
 
 use crate::slot::Slot;
 
@@ -134,7 +135,15 @@ const NODE_SIZE: usize = NodeSize::Small.properties().size;
 /// The memory alignment required for each node to have sufficient `TAG_BITS` in each node pointer.
 const NODE_ALIGN: usize = NodeSize::Small.properties().alignment();
 
-type AtomicTagPtr<T> = tagptr::AtomicTagPtr<T, TAG_BITS>;
+#[repr(align(64))]
+struct AtomicTagPtr<T>(tagptr::AtomicTagPtr<T, TAG_BITS>);
+
+impl<T> AtomicTagPtr<T> {
+    fn new(ptr: TagPtr<T>) -> Self {
+        Self(tagptr::AtomicTagPtr::new(ptr))
+    }
+}
+
 type TagPtr<T> = tagptr::TagPtr<T, TAG_BITS>;
 
 // TODO: parametrize all queue/from_iter constructors with this enum
@@ -499,7 +508,7 @@ fn cas_atomic_tag_ptr_loop<T>(
 ) -> Option<u32> {
     const REL_RLX_CAS: (Ordering, Ordering) = (Ordering::Release, Ordering::Relaxed);
     // loop & try to CAS the ptr until the CAS succeeds
-    while let Err(read) = ptr.compare_exchange(current, new, REL_RLX_CAS) {
+    while let Err(read) = ptr.0.compare_exchange(current, new, REL_RLX_CAS) {
         // the CAS failed due to a competing CAS or FAA from another thread, but the loaded value
         // shows, that the pointer itself has been changed (instead of only the tag), so another
         // thread must have been successfull in exchanging the pointer
@@ -522,7 +531,7 @@ unsafe fn try_advance_tail<T>(
     tail: *mut Node<T>,
 ) -> Result<(), NotInserted> {
     // read an up-to-date snapshot of the tail pointer
-    let current = ptr.load(Ordering::Relaxed);
+    let current = ptr.0.load(Ordering::Relaxed);
     // check, if the tail as already been updated by another thread
     if tail != current.decompose_ptr() {
         Node::count_push_and_try_reclaim(tail, None);
