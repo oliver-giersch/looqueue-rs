@@ -32,7 +32,6 @@ pub fn queue<T>() -> (Producer<T>, Consumer<T>) {
 pub fn from_iter<T>(iter: impl Iterator<Item = T>) -> (Producer<T>, Consumer<T>) {
     // collect the iterator (single-threaded) into a owned queue
     let (head, tail) = iter.collect::<OwnedQueue<_>>().into_raw_parts();
-
     // allocate the reference-counted queue handle
     let ptr = NonNull::from(Box::leak(Box::new(ArcQueue {
         counts: RefCounts::default(),
@@ -56,7 +55,8 @@ pub struct Producer<T> {
     ptr: NonNull<ArcQueue<T>>,
 }
 
-// SAFETY: Producers can be sent (Send) across threads but not shared (!Sync)
+// SAFETY: Producers can be sent (Send) across threads but not shared (!Sync), since it must be
+// guaranteed, that there are never more than MAX_PRODUCERS threads concurrently pushing values
 unsafe impl<T: Send> Send for Producer<T> {}
 // unsafe impl<T> !Sync for Producer<T> {}
 

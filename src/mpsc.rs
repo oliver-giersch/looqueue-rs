@@ -204,7 +204,7 @@ impl<T> Consumer<T> {
     /// assert_eq!(queue.iter().count(), 10);
     /// # Ok(())
     /// # }
-    /// ```    
+    /// ```
     pub fn try_unwrap(self) -> Result<OwnedQueue<T>, Self> {
         // SAFETY: pointer deref is sound, since at least one live handle exists
         if unsafe { self.ptr.as_ref().counts.producer_count() == 0 } {

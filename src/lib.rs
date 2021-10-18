@@ -128,12 +128,14 @@ pub const MAX_PRODUCERS: usize = (1 << TAG_BITS) - NODE_SIZE + 1;
 /// [`mpmpc`](crate::mpmc) queue.
 pub const MAX_CONSUMERS: usize = ((1 << TAG_BITS) - NODE_SIZE + 1) / 2;
 
+const DEFAULT_SIZE: NodeSize = NodeSize::Small;
+
 /// The number of tag bits required to represent the index tag.
-const TAG_BITS: usize = NodeSize::Small.properties().tag_bits;
+const TAG_BITS: usize = DEFAULT_SIZE.properties().tag_bits;
 /// The number of elements (slots) in each node.
-const NODE_SIZE: usize = NodeSize::Small.properties().size;
+const NODE_SIZE: usize = DEFAULT_SIZE.properties().size;
 /// The memory alignment required for each node to have sufficient `TAG_BITS` in each node pointer.
-const NODE_ALIGN: usize = NodeSize::Small.properties().alignment();
+const NODE_ALIGN: usize = DEFAULT_SIZE.properties().alignment();
 
 #[repr(align(64))]
 struct AtomicTagPtr<T>(tagptr::AtomicTagPtr<T, TAG_BITS>);
@@ -147,20 +149,24 @@ impl<T> AtomicTagPtr<T> {
 type TagPtr<T> = tagptr::TagPtr<T, TAG_BITS>;
 
 // TODO: parametrize all queue/from_iter constructors with this enum
-// TODO: alternatively, use at type level
 #[allow(unused)]
+#[repr(usize)]
+#[derive(Clone, Copy, Debug)]
 enum NodeSize {
-    Small,  // e.g. 64
-    Medium, // e.g. 128
-    Large,  // e.g. 1024
+    Tiny = 32,
+    Small = 64,
+    Medium = 128,
+    Large = 1024,
 }
 
 impl NodeSize {
     const fn properties(&self) -> NodeProperties {
+        let (tag_bits, size) = (12, *self as usize);
         match self {
-            Self::Small => NodeProperties { tag_bits: 12, size: 64 },
-            Self::Medium => NodeProperties { tag_bits: 12, size: 128 },
-            Self::Large => NodeProperties { tag_bits: 12, size: 1024 },
+            Self::Tiny => NodeProperties { tag_bits, size },
+            Self::Small => NodeProperties { tag_bits, size },
+            Self::Medium => NodeProperties { tag_bits, size },
+            Self::Large => NodeProperties { tag_bits, size },
         }
     }
 }
@@ -172,7 +178,7 @@ struct NodeProperties {
 
 impl NodeProperties {
     const fn alignment(&self) -> usize {
-        1 << self.tag_bits
+        0x1 << self.tag_bits
     }
 }
 
@@ -193,7 +199,7 @@ impl<T> Node<T> {
     /// The bitmask to extract the current count (lower bits) of concluded operations.
     const MASK: u32 = 0xFFFF;
 
-    const SLOT: Slot<T> = Slot::new(); // FIXME: use inline const once stable
+    const SLOT: Slot<T> = Slot::new(); // FIXME: use inline-const once stable
 
     /// Creates a new node of uninitialized slots.
     const fn new() -> Self {
@@ -508,16 +514,16 @@ fn cas_atomic_tag_ptr_loop<T>(
 ) -> Option<u32> {
     const REL_RLX_CAS: (Ordering, Ordering) = (Ordering::Release, Ordering::Relaxed);
     // loop & try to CAS the ptr until the CAS succeeds
-    while let Err(read) = ptr.0.compare_exchange(current, new, REL_RLX_CAS) {
+    while let Err(actual) = ptr.0.compare_exchange(current, new, REL_RLX_CAS) {
         // the CAS failed due to a competing CAS or FAA from another thread, but the loaded value
         // shows, that the pointer itself has been changed (instead of only the tag), so another
         // thread must have been successfull in exchanging the pointer
-        if read.decompose_ptr() != old {
+        if actual.decompose_ptr() != old {
             return None;
         }
 
         // update the expected value and repeat
-        current = read;
+        current = actual;
     }
 
     // since tag values can not exceed the tag bit limit, this cast will never truncate any bits
