@@ -10,4 +10,7 @@ keywords = ["fifo", "queue", "concurrency", "mpmc", "mpsc"]
 edition = "2018"
 
 [dependencies]
+cfg-if = "1.0.0"
+
+[target.'cfg(target_pointer_width = "64")'.dependencies]
 tagptr = "0.2.0"

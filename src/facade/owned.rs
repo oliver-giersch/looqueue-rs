@@ -1,8 +1,9 @@
 use std::{fmt, iter, mem, ptr, sync::atomic::Ordering};
 
-use crate::slot::{DropSlot, Slot};
-
-use super::{Cursor, Node};
+use crate::facade::{
+    slot::{DropSlot, Slot},
+    Cursor, Node, NODE_SIZE,
+};
 
 /// An owned, non-thread-safe FIFO queue that can be trivially transformed into or created from
 /// either an [`mpsc`](crate::mpsc) or an [`mpmc`](crate::mpmc) queue.
@@ -52,7 +53,7 @@ impl<T> OwnedQueue<T> {
     /// Pushes `elem` to the back of the queue.
     pub fn push_back(&mut self, elem: T) {
         let Cursor { ptr, idx } = self.tail;
-        if idx < crate::NODE_SIZE {
+        if idx < NODE_SIZE {
             unsafe { (*ptr).slots[idx].write_unsync(elem) };
             self.tail.idx += 1;
         } else {
@@ -70,7 +71,7 @@ impl<T> OwnedQueue<T> {
 
         // the cursor to the current head slot
         let Cursor { ptr: head, idx } = self.head;
-        if idx < crate::NODE_SIZE {
+        if idx < NODE_SIZE {
             let res = unsafe { (*head).slots[idx].consume_unchecked_unsync() };
             self.head.idx += 1;
             Some(res)
@@ -99,7 +100,7 @@ impl<T> OwnedQueue<T> {
     }
 
     /// Leaks the queue and it returns its (raw) head and tail (pointer, index) tuples.
-    pub(crate) fn into_raw_parts(self) -> (Cursor<T>, Cursor<T>) {
+    pub(super) fn into_raw_parts(self) -> (Cursor<T>, Cursor<T>) {
         let parts = (self.head, self.tail);
         mem::forget(self);
         parts
@@ -110,7 +111,7 @@ impl<T> OwnedQueue<T> {
     /// # Safety
     ///
     /// `head` and `tail` must form a linked list of valid/live nodes.
-    pub(crate) unsafe fn from_raw_parts(head: Cursor<T>, tail: Cursor<T>) -> Self {
+    pub(super) unsafe fn from_raw_parts(head: Cursor<T>, tail: Cursor<T>) -> Self {
         Self { head, tail }
     }
 }
@@ -123,8 +124,7 @@ impl<T> Drop for OwnedQueue<T> {
             if mem::needs_drop::<T>() {
                 // the highest index is either NODE_SIZE of the tail index, once the loop reaches
                 // the tail node
-                let hi_idx =
-                    if self.head.ptr == self.tail.ptr { self.tail.idx } else { crate::NODE_SIZE };
+                let hi_idx = if self.head.ptr == self.tail.ptr { self.tail.idx } else { NODE_SIZE };
                 // SAFETY: the range (idx..hi_idx) identifies all the slots that can be safely
                 // dropped, so these slots can be safely cast to `DropSlot`s
                 unsafe {
@@ -157,7 +157,7 @@ impl<T> iter::FromIterator<T> for OwnedQueue<T> {
 
         for elem in iter.into_iter() {
             let idx = queue.tail.idx;
-            if idx < crate::NODE_SIZE {
+            if idx < NODE_SIZE {
                 // write elem into first free slot of current tail node
                 unsafe { (*queue.tail.ptr).slots[idx].write_unsync(elem) };
                 queue.tail.idx += 1;
@@ -300,7 +300,7 @@ impl<T> Span<'_, T> {
         if self.start.ptr == self.end.ptr {
             self.end.idx - self.start.idx
         } else {
-            let mut len = crate::NODE_SIZE - self.start.idx;
+            let mut len = NODE_SIZE - self.start.idx;
             let mut curr = self.start.ptr;
             loop {
                 curr = unsafe { (*curr).next.load(Ordering::Relaxed) };
@@ -308,7 +308,7 @@ impl<T> Span<'_, T> {
                     break;
                 }
 
-                len += crate::NODE_SIZE;
+                len += NODE_SIZE;
             }
 
             len + self.end.idx
@@ -320,7 +320,7 @@ impl<T> Span<'_, T> {
 mod tests {
     use std::{cell::Cell, iter::FromIterator};
 
-    use crate::NODE_SIZE;
+    use crate::facade::NODE_SIZE;
 
     use super::OwnedQueue;
 
@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn test_iter() {
-        const N: usize = crate::NODE_SIZE * 2;
+        const N: usize = NODE_SIZE * 2;
 
         let queue = OwnedQueue::from_iter(0..N);
         let mut iter = queue.iter();
@@ -426,16 +426,16 @@ mod tests {
 
         let queue = OwnedQueue::from_iter(0..N);
         let mut iter = queue.iter();
-        for i in 0..crate::NODE_SIZE {
+        for i in 0..NODE_SIZE {
             assert_eq!(iter.next(), Some(&i));
         }
 
-        assert_eq!(iter.len(), N - crate::NODE_SIZE);
+        assert_eq!(iter.len(), N - NODE_SIZE);
     }
 
     #[test]
     fn test_into_iter() {
-        const N: usize = crate::NODE_SIZE * 2;
+        const N: usize = NODE_SIZE * 2;
 
         let mut iter = OwnedQueue::from_iter(0..N).into_iter();
         for i in 0..N {
@@ -447,7 +447,7 @@ mod tests {
 
     #[test]
     fn test_into_iter_abortive() {
-        const N: usize = crate::NODE_SIZE * 2;
+        const N: usize = NODE_SIZE * 2;
 
         struct Canary<'a>(&'a Cell<usize>);
         impl Drop for Canary<'_> {
@@ -486,7 +486,7 @@ mod tests {
         let counter = Cell::new(0);
 
         let mut queue = OwnedQueue::new();
-        for _ in 0..(crate::NODE_SIZE * 3) {
+        for _ in 0..(NODE_SIZE * 3) {
             queue.push_back(Canary(&counter));
         }
 
