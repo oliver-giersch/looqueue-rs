@@ -251,7 +251,7 @@ impl<T> Consumer<T> {
     /// This method must be called at most once and the handle must not be used again after.
     pub unsafe fn drop_explicit(&mut self) -> Option<DropResult> {
         // SAFETY: pointer deref is sound, since at least one live handle exists
-        let res = unsafe { self.ptr.as_ref().counts.decrease_producer_count() };
+        let res = unsafe { self.ptr.as_ref().counts.decrease_consumer_count() };
         if let Some(DropResult::LastOfAny) = &res {
             // SAFETY: there are no other live handles and none can be created anymore at this
             // point, so the handle can be safely deallocated
