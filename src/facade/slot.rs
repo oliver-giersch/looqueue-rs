@@ -84,7 +84,7 @@ impl<T> Slot<T> {
                 // SAFETY: Since the PRODUCER bit is already set, the slot can be safely read (no
                 // data race is possible) and the CONSUMED_OR_INVALIDATED bit can be set right away,
                 // as no 2-step invalidation is necessary
-                let elem = unsafe { self.read_volatile() };
+                let elem = unsafe { self.read() };
                 return match self.state.fetch_add(CONSUMED_OR_INVALIDATED, Ordering::Release) {
                     // the expected/likely case
                     PRODUCER => ConsumeResult::Success { elem, resume_check: false },
@@ -98,6 +98,8 @@ impl<T> Slot<T> {
 
         // after an unsuccessful bounded wait, try one final time or invalidate (abandon) the slot
         // if this fails as well due to the producer still not having finished its operation
+        // NOTE: this is expensive but is unlikely to occur, i.e. the bounded wait will usually
+        // suffice
         unsafe { self.try_consume_unlikely() }
     }
 
@@ -119,6 +121,7 @@ impl<T> Slot<T> {
         *self = Self::with(elem);
     }
 
+    /// Writes `elem` tentatively into the slot.
     pub(crate) unsafe fn write_tentative(&self, elem: &ManuallyDrop<T>) -> WriteResult {
         // if a slot has already been visited and marked for abandonment AND halted at in an attempt
         // to check if all slots have yet been consumed, a producer must abandon that slot and
@@ -127,10 +130,12 @@ impl<T> Slot<T> {
 
         // write the element's bits tentatively into the slot, i.e. the write may yet be revoked, in
         // which case the source must remain valid
-        self.write_volative(elem);
+        self.write(elem);
         // after the slot is initialized, set the WRITER bit in the slot's state field and assess,
         // if any other bits had been set by other (consumer) threads
         match self.state.fetch_add(PRODUCER, Ordering::Release) {
+            // either no bit or ONLY the continue bit is set => success, the continue bit will only
+            // matter for the corresponding consumer, when it sets its bit in the same slot
             UNINIT | CONTINUE_CHECK => WriteResult::Success,
             PRODUCER_RESUMES => WriteResult::Abandon { resume_check: true },
             _ => WriteResult::Abandon { resume_check: false },
@@ -148,9 +153,9 @@ impl<T> Slot<T> {
         let (res, mut resume_check) = match self.state.fetch_add(NO_PRODUCER_YET, Ordering::Acquire)
         {
             // the slot has now been initialized, so the slot can now be consumed
-            PRODUCER => (Some(self.read_volatile()), false),
+            PRODUCER => (Some(self.read()), false),
             // the slot has now been initialized, but the slot check must be resumed
-            CONSUMER_RESUMES_A => (Some(self.read_volatile()), true),
+            CONSUMER_RESUMES_A => (Some(self.read()), true),
             // the slot has still not been initialized, so it must truly be abandoned now
             _ => (None, false),
         };
@@ -170,13 +175,16 @@ impl<T> Slot<T> {
     }
 
     /// Reads the bytes of this slot without performing any checks.
-    unsafe fn read_volatile(&self) -> T {
-        unsafe { (*self.inner.get()).as_ptr().read_volatile() }
+    unsafe fn read(&self) -> T {
+        unsafe { (*self.inner.get()).as_ptr().read() }
     }
 
     /// Writes the bytes of `elem` into this slit without performing any checks.
-    unsafe fn write_volative(&self, elem: &ManuallyDrop<T>) {
-        unsafe { (*self.inner.get()).as_mut_ptr().write_volatile(ptr::read(&**elem)) };
+    unsafe fn write(&self, elem: &ManuallyDrop<T>) {
+        unsafe {
+            let ptr = (*self.inner.get()).as_mut_ptr();
+            ptr.copy_from_nonoverlapping(&**elem, 1);
+        }
     }
 }
 

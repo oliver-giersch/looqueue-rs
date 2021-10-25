@@ -516,7 +516,17 @@ mod tests {
     }
 
     #[test]
-    fn test_from_iter() {
+    fn test_from_iter_1() {
+        let (_, rx) = super::from_iter(0..1000);
+        for i in 0..1000 {
+            assert_eq!(rx.pop_front(), Some(i));
+        }
+
+        assert_eq!(rx.pop_front(), None);
+    }
+
+    #[test]
+    fn test_from_iter_2() {
         let (_, rx) = super::from_iter((0..).skip(10).take(10));
         for i in 10..20 {
             assert_eq!(rx.pop_front(), Some(i));
