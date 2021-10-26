@@ -1,4 +1,8 @@
-use std::{fmt, iter, mem, ptr, sync::atomic::Ordering};
+use std::{
+    fmt, iter, mem,
+    ptr::{self, NonNull},
+    sync::atomic::Ordering,
+};
 
 use crate::facade::{
     slot::{DropSlot, Slot},
@@ -57,9 +61,18 @@ impl<T> OwnedQueue<T> {
             unsafe { (*ptr).slots[idx].write_unsync(elem) };
             self.tail.idx += 1;
         } else {
-            let node = Node::aligned_alloc_with(elem);
-            unsafe { (*ptr).next.store(node, Ordering::Relaxed) };
-            self.tail = Cursor { ptr: node, idx: 1 };
+            let new = Node::aligned_alloc_with(elem);
+            // SAFETY: tail can be safely de-referenced & mutated, no concurrent
+            // accesses are possible
+            unsafe {
+                // set the node's next pointer
+                *(*ptr).next.get_mut() = new;
+                // set the TAIL_ADVANCED bit to allow this node to be reclaimed
+                // when it becomes drained later on
+                (*ptr).control.mark_tail_advanced();
+            }
+
+            self.tail = Cursor { ptr: new, idx: 1 };
         }
     }
 
@@ -72,10 +85,12 @@ impl<T> OwnedQueue<T> {
         // the cursor to the current head slot
         let Cursor { ptr: head, idx } = self.head;
         if idx < NODE_SIZE {
+            // SAFETY: the queue ist not empty and the slot has not yet been consumed
             let res = unsafe { (*head).slots[idx].consume_unchecked_unsync() };
             self.head.idx += 1;
             Some(res)
         } else {
+            // SAFETY: head & next can be safely de-referenced, (only) head is de-allocated last
             let res = unsafe {
                 let next = (*head).next.load(Ordering::Relaxed);
                 let res = (*next).slots[0].consume_unchecked_unsync();
@@ -154,28 +169,8 @@ impl<T> iter::FromIterator<T> for OwnedQueue<T> {
         I: IntoIterator<Item = T>,
     {
         let mut queue = Self::new();
-
         for elem in iter.into_iter() {
-            let idx = queue.tail.idx;
-            if idx < NODE_SIZE {
-                // write elem into first free slot of current tail node
-                unsafe { (*queue.tail.ptr).slots[idx].write_unsync(elem) };
-                queue.tail.idx += 1;
-            } else {
-                // allocate & append a new tail node
-                let next = Node::aligned_alloc_with(elem);
-                // SAFETY: the tail pointer can be safely de-referenced and the node mutated, since
-                // there no other mutations are possible concurrently, there are no mutable
-                // references and the node is still alive
-                unsafe {
-                    // set the node's next pointer
-                    *(*queue.tail.ptr).next.get_mut() = next;
-                    // set the TAIL_ADVANCED bit to allow this node to be reclaimed once it is drained
-                    (*queue.tail.ptr).control.mark_tail_advanced()
-                }
-
-                queue.tail = Cursor { ptr: next, idx: 1 };
-            }
+            queue.push_back(elem);
         }
 
         queue
@@ -256,7 +251,7 @@ impl<T> Iterator for IntoIter<T> {
         unsafe {
             let mut prev = None;
             let ptr = self.queue.head.next_unchecked(&self.queue.tail, &mut prev);
-            let elem = (!ptr.is_null()).then(|| ptr.read());
+            let elem = NonNull::new(ptr).map(|ptr| ptr.as_ptr().read());
 
             if let Some(node) = prev {
                 Node::dealloc(node);

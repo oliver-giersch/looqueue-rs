@@ -199,7 +199,7 @@ impl<T> Drop for DropSlot<T> {
     fn drop(&mut self) {
         // SAFETY: this in fact NOT safe in general, because it neither checks if the wrapped slot
         // has ever been initialized, nor if it has not yet been consumed, but `drop` can not be an
-        // `unsafe` function; yet:
+        // `unsafe` function; but:
         // - the type can not be safely constructed at all, only using unsafe pointer casts
         // - the type is only used internally and only in one place (`OwnedQueue::drop`)
         // - the drop code carefully identifies the slots that are safe to drop and casts only

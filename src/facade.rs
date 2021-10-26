@@ -375,7 +375,8 @@ impl<T> Clone for Cursor<T> {
 impl<T> Copy for Cursor<T> {}
 
 impl<T> Cursor<T> {
-    /// Iterates over the pointers to each slot as if all nodes were laid out continously in memory.
+    // Iterates over the pointers to each slot as if all nodes were laid out continously in memory
+    // and returns `null` after passing the final slot.
     unsafe fn next_unchecked(&mut self, end: &Self, prev: &mut Option<*mut Node<T>>) -> *mut T {
         if self.ptr.is_null() || (self.ptr == end.ptr && self.idx >= end.idx) {
             return ptr::null_mut();
@@ -389,6 +390,7 @@ impl<T> Cursor<T> {
             elem
         } else {
             let curr = self.ptr;
+            // next may be null, in which case all further calls will return null
             let next = (*curr).next.load(Ordering::Relaxed);
 
             *self = Cursor { ptr: next, idx: 0 };
