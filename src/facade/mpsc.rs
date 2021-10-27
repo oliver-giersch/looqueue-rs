@@ -1,10 +1,10 @@
 //! The multi-producer, single-consumer (MPSC) variant of the *looqueue* algorithm.
 
-use std::{
-    alloc,
+use alloc::boxed::Box;
+use core::{
     cell::Cell,
     fmt,
-    iter::FromIterator,
+    iter::{self, FromIterator},
     mem::{self, ManuallyDrop},
     ptr::NonNull,
     sync::atomic::{AtomicPtr, Ordering},
@@ -242,7 +242,7 @@ impl<T> Consumer<T> {
 
     /// Returns an iterator consuming each element in the queue.
     pub fn drain(&self) -> impl Iterator<Item = T> + '_ {
-        std::iter::from_fn(move || self.pop_front())
+        iter::from_fn(move || self.pop_front())
     }
 
     /// Drops this handle without consuming it and returns a result indicating how many other
@@ -286,7 +286,7 @@ impl<T> ArcQueue<T> {
             // "extract" the contents from the heap (but keep the source intact)
             let ArcQueue { raw, .. } = queue.read();
             // allocate the memory without dropping anything!
-            alloc::dealloc(queue.cast(), alloc::Layout::new::<Self>());
+            alloc::alloc::dealloc(queue.cast(), alloc::alloc::Layout::new::<Self>());
             // convert the extracted queue into an owned queue
             let (head, tail) = raw.into_raw_parts();
             OwnedQueue::from_raw_parts(head, tail)
@@ -498,7 +498,7 @@ impl<T> Drop for RawQueue<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, mem};
+    use std::{cell::Cell, mem, vec::Vec};
 
     use crate::facade::NODE_SIZE;
 

@@ -6,8 +6,8 @@ pub(super) mod refcount;
 
 mod slot;
 
-use std::{
-    alloc::{self, Layout},
+use alloc::alloc::Layout;
+use core::{
     mem::ManuallyDrop,
     ptr,
     sync::atomic::{AtomicPtr, AtomicU32, AtomicU8, Ordering},
@@ -163,9 +163,9 @@ impl<T> Node<T> {
     /// Allocates memory for storing a [`Node`] aligned to [`NODE_ALIGN`], leaving it uninitialized.
     fn aligned_alloc_uninit() -> *mut Self {
         let layout = Layout::new::<Self>().align_to(NODE_ALIGN).unwrap();
-        let ptr: *mut Self = unsafe { alloc::alloc(layout) }.cast();
+        let ptr: *mut Self = unsafe { alloc::alloc::alloc(layout) }.cast();
         if ptr.is_null() {
-            alloc::handle_alloc_error(layout);
+            alloc::alloc::handle_alloc_error(layout);
         }
 
         ptr
@@ -296,7 +296,7 @@ impl<T> Node<T> {
     /// In addition, `node` must point to a node that is aligned to [`NODE_ALIGN`].
     unsafe fn dealloc(node: *mut Self) {
         let layout = Layout::new::<Self>().align_to(NODE_ALIGN).unwrap();
-        alloc::dealloc(node.cast(), layout);
+        alloc::alloc::dealloc(node.cast(), layout);
     }
 }
 

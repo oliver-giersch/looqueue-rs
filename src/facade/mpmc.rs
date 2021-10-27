@@ -1,7 +1,8 @@
 //! The multi-producer, multi-consumer (MPMC) variant of the *looqueue* algorithm.
 
-use std::{
-    alloc, fmt,
+use alloc::{alloc::Layout, boxed::Box};
+use core::{
+    fmt, iter,
     mem::{self, ManuallyDrop},
     ptr::NonNull,
     sync::atomic::{AtomicPtr, Ordering},
@@ -11,9 +12,9 @@ use crate::facade::{
     owned::OwnedQueue,
     refcount::{DropResult, RefCounts},
     slot::{ConsumeResult, WriteResult},
-    AtomicTagPtr, Cursor, NoNextNode, Node, NotInserted, TagPtr, NODE_SIZE,
+    AtomicTagPtr, Cursor, NoNextNode, Node, NotInserted, TagPtr, MAX_CONSUMERS, MAX_PRODUCERS,
+    NODE_SIZE,
 };
-use crate::{MAX_CONSUMERS, MAX_PRODUCERS};
 
 /// Creates a new concurrent multi-producer, multi-consumer (MPMC) queue and returns (cloneable)
 /// [`Producer`] and [`Consumer`] handles to that queue.
@@ -240,7 +241,7 @@ impl<T> Consumer<T> {
 
     /// Returns an iterator consuming each element in the queue.
     pub fn drain(&self) -> impl Iterator<Item = T> + '_ {
-        std::iter::from_fn(move || self.pop_front())
+        iter::from_fn(move || self.pop_front())
     }
 
     /// Drops this handle without consuming it and returns a result indicating how many other
@@ -284,7 +285,7 @@ impl<T> ArcQueue<T> {
             // "extract" the contents from the heap (but keep the source memory intact)
             let ArcQueue { raw, .. } = queue.read();
             // allocate the memory without dropping anything!
-            alloc::dealloc(queue.cast(), alloc::Layout::new::<Self>());
+            alloc::alloc::dealloc(queue.cast(), Layout::new::<Self>());
             // convert the extracted queue into an owned queue
             let (head, tail) = raw.into_raw_parts();
             OwnedQueue::from_raw_parts(head, tail)
@@ -535,6 +536,8 @@ impl<T> Drop for RawQueue<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::vec::Vec;
+
     #[test]
     fn test_push_pop() {
         let (tx, rx) = super::queue();

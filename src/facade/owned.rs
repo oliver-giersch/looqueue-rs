@@ -1,4 +1,4 @@
-use std::{
+use core::{
     fmt, iter, mem,
     ptr::{self, NonNull},
     sync::atomic::Ordering,
@@ -58,6 +58,8 @@ impl<T> OwnedQueue<T> {
     pub fn push_back(&mut self, elem: T) {
         let Cursor { ptr, idx } = self.tail;
         if idx < NODE_SIZE {
+            // SAFETY: tail can be safely de-referenced & mutated, no concurrent
+            // accesses are possible
             unsafe { (*ptr).slots[idx].write_unsync(elem) };
             self.tail.idx += 1;
         } else {
@@ -284,7 +286,7 @@ impl<T> IntoIterator for OwnedQueue<T> {
     }
 }
 
-/// A span of connected nodes.s
+/// A span of connected nodes.
 struct Span<'a, T> {
     start: &'a Cursor<T>,
     end: &'a Cursor<T>,

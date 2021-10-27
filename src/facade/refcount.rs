@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 /// A result indicating how many handles to a queue remain after dropping a producer or consumer.
 ///

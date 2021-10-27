@@ -1,4 +1,4 @@
-use std::{
+use core::{
     cell::UnsafeCell,
     mem::{ManuallyDrop, MaybeUninit},
     ptr,
@@ -91,7 +91,7 @@ impl<T> Slot<T> {
                     // RESUME can only be set if there are multiple consumers
                     CONTINUE_OR_PRODUCER => ConsumeResult::Success { elem, resume_check: true },
                     // SAFETY: no other combination of state bits is possible at this point
-                    _ => unsafe { std::hint::unreachable_unchecked() },
+                    _ => unsafe { core::hint::unreachable_unchecked() },
                 };
             }
         }
