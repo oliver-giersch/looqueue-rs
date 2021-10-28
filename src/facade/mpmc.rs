@@ -163,7 +163,9 @@ pub struct Consumer<T> {
     ptr: NonNull<ArcQueue<T>>,
 }
 
-// SAFETY: Consumer can be sent (Send) across threads but not shared (!Sync)
+// SAFETY: Producers can be sent (Send) across threads but not shared (!Sync), since `push_back`
+// taskes a shared reference and the number of possible threads of execution must be carefully
+// controlled
 unsafe impl<T: Send> Send for Consumer<T> {}
 // unsafe impl<T> !Sync for Consumer<T> {}
 
@@ -328,8 +330,8 @@ impl<T> RawQueue<T> {
         // cache line is never in the "shared" state, which reduces the amount of work required by
         // the cache-coherence protocol, in effect the cache line ping-pongs from one CPUs ownership
         // to another's)
-        let head: Cursor<_> = self.head.0.fetch_add(0, Ordering::Relaxed).decompose().into();
         let tail_cached = self.tail_cached.load(Ordering::Acquire);
+        let head: Cursor<_> = self.head.0.fetch_add(0, Ordering::Relaxed).decompose().into();
 
         // if the cached tail points to a different node, head and tail CAN NOT point to the same
         // node, even if the cached tail is lagging behind and the queue must be non-empty
@@ -339,10 +341,11 @@ impl<T> RawQueue<T> {
 
         // head and tail (potentially) point to the same node, so we need to compare their
         // indices, which is undesirable because it requires loading the potentially highly
-        // contended tail pointer
+        // contended tail pointer as well
         let tail: Cursor<_> = self.tail.0.load(Ordering::Relaxed).decompose().into();
         // check if the cached tail is lagging behind and help updating it, if it is
         if tail.ptr != tail_cached {
+            // the result of the CAS can be ignored; in either case the cached tail was updated
             let _ = self.tail_cached.compare_exchange(
                 tail_cached,
                 tail.ptr,

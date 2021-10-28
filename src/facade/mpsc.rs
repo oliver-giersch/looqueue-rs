@@ -57,7 +57,9 @@ pub struct Producer<T> {
     ptr: NonNull<ArcQueue<T>>,
 }
 
-// SAFETY: Producers can be sent (Send) across threads but not shared (!Sync)
+// SAFETY: Producers can be sent (Send) across threads but not shared (!Sync), since `push_back`
+// taskes a shared reference and the number of possible threads of execution must be carefully
+// controlled
 unsafe impl<T: Send> Send for Producer<T> {}
 // unsafe impl<T> !Sync for Producer<T> {}
 
@@ -335,6 +337,7 @@ impl<T> RawQueue<T> {
         let tail: Cursor<_> = self.tail.0.load(Ordering::Relaxed).decompose().into();
         // check if the cached tail is lagging behind and help updating it, if it is
         if tail.ptr != tail_cached {
+            // the result of the CAS can be ignored; in either case the cached tail was updated
             let _ = self.tail_cached.compare_exchange(
                 tail_cached,
                 tail.ptr,
