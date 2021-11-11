@@ -15,19 +15,21 @@ use core::{
 
 use slot::Slot;
 
+// TODO: currently, this is a static setting; ideally queues should be const-generic
+// over a compile time `NodeSize` parameter
+const DEFAULT_SIZE: NodeSize = NodeSize::Tiny;
+
 /// The maximum number of producer handles that may exist at the same time for a single
 /// [`mpsc`](crate::mpsc) or [`mpmpc`](crate::mpmc) queue.
-pub const MAX_PRODUCERS: usize = (1 << TAG_BITS) - NODE_SIZE + 1;
+pub const MAX_PRODUCERS: usize = DEFAULT_SIZE.properties().max_producers();
 /// The maximum number of consumer handles that may exist at the same time for a single
 /// [`mpmpc`](crate::mpmc) queue.
-pub const MAX_CONSUMERS: usize = ((1 << TAG_BITS) - NODE_SIZE + 1) / 2;
-
-const DEFAULT_SIZE: NodeSize = NodeSize::Small;
+pub const MAX_CONSUMERS: usize = DEFAULT_SIZE.properties().max_consumers();
 
 /// The number of tag bits required to represent the index tag.
 const TAG_BITS: usize = DEFAULT_SIZE.properties().tag_bits;
 /// The number of elements (slots) in each node.
-const NODE_SIZE: usize = DEFAULT_SIZE.properties().size;
+const NODE_SIZE: usize = DEFAULT_SIZE.size();
 /// The memory alignment required for each node to have sufficient `TAG_BITS` in each node pointer.
 const NODE_ALIGN: usize = DEFAULT_SIZE.properties().alignment();
 
@@ -42,10 +44,9 @@ impl<T> AtomicTagPtr<T> {
 
 type TagPtr<T> = tagptr::TagPtr<T, TAG_BITS>;
 
-// TODO: parametrize all queue/from_iter constructors with this enum
 #[allow(unused)]
 #[repr(usize)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NodeSize {
     Tiny = 32,
     Small = 64,
@@ -54,14 +55,18 @@ enum NodeSize {
 }
 
 impl NodeSize {
-    const fn properties(&self) -> NodeProperties {
-        let (tag_bits, size) = (12, *self as usize);
+    const fn properties(self) -> NodeProperties {
+        let (tag_bits, size) = (12, self as usize);
         match self {
-            Self::Tiny => NodeProperties { tag_bits, size },
+            Self::Tiny => NodeProperties { tag_bits: 9, size },
             Self::Small => NodeProperties { tag_bits, size },
             Self::Medium => NodeProperties { tag_bits, size },
             Self::Large => NodeProperties { tag_bits, size },
         }
+    }
+
+    const fn size(self) -> usize {
+        self.properties().size
     }
 }
 
@@ -73,6 +78,14 @@ struct NodeProperties {
 impl NodeProperties {
     const fn alignment(&self) -> usize {
         0x1 << self.tag_bits
+    }
+
+    const fn max_producers(&self) -> usize {
+        (1 << self.tag_bits) - self.size + 1
+    }
+
+    const fn max_consumers(&self) -> usize {
+        ((1 << self.tag_bits) - self.size + 1) / 2
     }
 }
 
