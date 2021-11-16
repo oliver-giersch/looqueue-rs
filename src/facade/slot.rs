@@ -146,7 +146,6 @@ impl<T> Slot<T> {
     unsafe fn try_consume_unlikely(&self) -> ConsumeResult<T> {
         // FIXME: could be replaced with inline const
         const CONSUMER_RESUMES_A: u8 = PRODUCER | CONTINUE_CHECK;
-        const CONSUMER_RESUMES_B: u8 = NO_PRODUCER_YET | CONSUMER_RESUMES_A;
 
         // set the NO_PRODUCER_YET bit, which leads to all subsequent write attempts to fail, but
         // check, if the PRODUCER bit has been set before by now
@@ -164,7 +163,7 @@ impl<T> Slot<T> {
         // a write has occurred or not is no longer relevant at this point
         let state = self.state.fetch_add(CONSUMED_OR_INVALIDATED, Ordering::Release);
         // if the CONTINUE_CHECK bit was not previously set but is now, the slot check must now be resumed
-        if !resume_check && state == CONSUMER_RESUMES_B {
+        if !resume_check && state == NO_PRODUCER_YET | CONSUMER_RESUMES_A {
             resume_check = true;
         }
 
