@@ -8,6 +8,7 @@ mod slot;
 
 use alloc::alloc::Layout;
 use core::{
+    fmt,
     mem::ManuallyDrop,
     ptr,
     sync::atomic::{AtomicPtr, AtomicU32, AtomicU8, Ordering},
@@ -104,6 +105,34 @@ struct Node<T> {
     control: ControlBlock,
     /// The pointer to the next node in the linked-list.
     next: AtomicPtr<Node<T>>,
+}
+
+impl<T: fmt::Debug> Node<T> {
+    pub(crate) fn as_dbg_view(&self) -> impl fmt::Debug + '_ {
+        struct NodeView<'a, T>(&'a Node<T>);
+
+        impl<T: fmt::Debug> fmt::Debug for NodeView<'_, T> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "[")?;
+                let mut is_first = true;
+                for slot in &self.0.slots {
+                    // SAFETY: the mutable reference ensures no concurrent access
+                    if let Some(elem) = unsafe { slot.inspect_unsync() } {
+                        if is_first {
+                            write!(f, "{:?}", elem)?;
+                            is_first = false;
+                        } else {
+                            write!(f, ", {:?}", elem)?;
+                        }
+                    }
+                }
+
+                write!(f, "]")
+            }
+        }
+
+        NodeView(self)
+    }
 }
 
 impl<T> Node<T> {

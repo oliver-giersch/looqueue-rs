@@ -37,6 +37,31 @@ impl<T> fmt::Debug for OwnedQueue<T> {
     }
 }
 
+impl<T: fmt::Debug> OwnedQueue<T> {
+    /// Returns a view of all elems in the queue.
+    pub fn as_view(&self) -> impl fmt::Debug + '_ {
+        struct QueueView<'a, T>(&'a OwnedQueue<T>);
+
+        impl<T: fmt::Debug> fmt::Debug for QueueView<'_, T> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{{")?;
+                let mut is_first = true;
+                for node in self.0.node_iter() {
+                    if is_first {
+                        write!(f, "{:?}", node.as_dbg_view())?;
+                        is_first = false;
+                    } else {
+                        write!(f, ", {:?}", node.as_dbg_view())?;
+                    }
+                }
+                write!(f, "}}")
+            }
+        }
+
+        QueueView(self)
+    }
+}
+
 impl<T> OwnedQueue<T> {
     /// Creates a new empty queue.
     pub fn new() -> Self {
@@ -131,6 +156,12 @@ impl<T> OwnedQueue<T> {
     /// `head` and `tail` must form a linked list of valid/live nodes.
     pub(super) unsafe fn from_raw_parts(head: Cursor<T>, tail: Cursor<T>) -> Self {
         Self { head, tail }
+    }
+
+    /// Returns an iterator over all nodes in the queue.
+    fn node_iter<'a>(&'a self) -> impl Iterator<Item = &'a Node<T>> + 'a {
+        let first = unsafe { self.head.ptr.as_ref() };
+        core::iter::successors(first, |&node| unsafe { node.next.load(Ordering::Relaxed).as_ref() })
     }
 }
 
@@ -501,5 +532,12 @@ mod tests {
         std::mem::drop(queue);
 
         assert_eq!(counter.get() as usize, NODE_SIZE * 3);
+    }
+
+    #[test]
+    fn view() {
+        let queue = OwnedQueue::from_iter(0..10);
+        let view = std::format!("{:?}", queue.as_view());
+        assert_eq!(view, "{[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]}");
     }
 }

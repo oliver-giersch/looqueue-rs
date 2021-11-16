@@ -58,6 +58,15 @@ impl<T> Slot<T> {
         unsafe { (*self.inner.get()).as_mut_ptr() }
     }
 
+    /// Inspects the state and contents of this slots and returns a reference to the element, if it
+    /// is initialized.
+    pub(crate) unsafe fn inspect_unsync(&self) -> Option<&T> {
+        (self.state.load(Ordering::Relaxed) == PRODUCER).then(move || unsafe {
+            let slot = &(*self.inner.get());
+            slot.assume_init_ref()
+        })
+    }
+
     /// Returns `true` if the slot is consumed.
     pub(crate) fn is_consumed(&self) -> bool {
         self.state.load(Ordering::Acquire) & CONSUMED == CONSUMED
@@ -178,7 +187,7 @@ impl<T> Slot<T> {
         unsafe { (*self.inner.get()).as_ptr().read() }
     }
 
-    /// Writes the bytes of `elem` into this slit without performing any checks.
+    /// Writes the bytes of `elem` into this slot without performing any checks.
     unsafe fn write(&self, elem: &ManuallyDrop<T>) {
         unsafe {
             let ptr = (*self.inner.get()).as_mut_ptr();
