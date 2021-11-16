@@ -157,7 +157,7 @@ impl<T> Drop for OwnedQueue<T> {
             }
 
             // SAFETY: This is safe because the current node's next pointer is read before the node
-            // itself is dropped
+            // itself is de-allocated
             unsafe {
                 self.head = Cursor { ptr: *(*curr).next.get_mut(), idx: 0 };
                 Node::dealloc(curr);
