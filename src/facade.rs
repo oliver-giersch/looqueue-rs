@@ -15,6 +15,12 @@ use core::{
 
 use slot::Slot;
 
+macro_rules! rel_rlx {
+    () => {
+        (Ordering::Release, Ordering::Relaxed)
+    };
+}
+
 // TODO: currently, this is a static setting; ideally queues should be const-generic
 // over a compile time `NodeSize` parameter
 const DEFAULT_SIZE: NodeSize = NodeSize::Tiny;
@@ -358,11 +364,12 @@ impl ControlBlock {
 
     /// Returns `true` if a node can be reclaimed after a `fetch_add` of `BIT` on the node's reclaim
     /// flags has previously returned `flags`.
-    fn is_reclaimable<const BIT: u8>(flags: u8) -> bool {
+    const fn is_reclaimable<const BIT: u8>(flags: u8) -> bool {
         flags == Self::reclaimable_mask(BIT)
     }
 
-    fn mark_tail_advanced(&mut self) {
+    /// Sets the TAIL_ADVANCED bit in this control block, overwriting any previous bits.
+    unsafe fn mark_tail_advanced(&mut self) {
         self.reclaim_flags.store(Self::TAIL_ADVANCED, Ordering::Relaxed)
     }
 }
@@ -388,8 +395,13 @@ impl<T> Clone for Cursor<T> {
 impl<T> Copy for Cursor<T> {}
 
 impl<T> Cursor<T> {
-    // Iterates over the pointers to each slot as if all nodes were laid out continously in memory
-    // and returns `null` after passing the final slot.
+    /// Iterates over the pointers to each slot as if all nodes were laid out continously in memory
+    /// and returns `null` after passing the final slot.
+    ///
+    /// # Safety
+    ///
+    /// The cursor and `end` must form a valid span, i.e., a continuous linked list of node with
+    /// only live and un-aliased pointers.
     unsafe fn next_unchecked(&mut self, end: &Self, prev: &mut Option<*mut Node<T>>) -> *mut T {
         if self.ptr.is_null() || (self.ptr == end.ptr && self.idx >= end.idx) {
             return ptr::null_mut();
@@ -399,13 +411,14 @@ impl<T> Cursor<T> {
         let elem = unsafe { (*self.ptr).slots[self.idx].as_mut_ptr() };
 
         if self.idx < NODE_SIZE - 1 {
+            // advance to the next slot within the same node
             self.idx += 1;
             elem
         } else {
+            // advance to the successor node, if there is any
             let curr = self.ptr;
-            // next may be null, in which case all further calls will return null
             let next = (*curr).next.load(Ordering::Relaxed);
-
+            // next may be null, in which case all further calls will return null
             *self = Cursor { ptr: next, idx: 0 };
             *prev = Some(curr);
 
@@ -421,9 +434,8 @@ fn cas_atomic_tag_ptr_loop<T>(
     new: TagPtr<Node<T>>,
     old: *mut Node<T>,
 ) -> Option<u32> {
-    const REL_RLX_CAS: (Ordering, Ordering) = (Ordering::Release, Ordering::Relaxed);
     // loop & try to CAS the ptr until the CAS succeeds
-    while let Err(actual) = ptr.0.compare_exchange(current, new, REL_RLX_CAS) {
+    while let Err(actual) = ptr.0.compare_exchange(current, new, rel_rlx!()) {
         // the CAS failed due to a competing CAS or FAA from another thread, but the loaded value
         // shows, that the pointer itself has been changed (instead of only the tag), so another
         // thread must have been successfull in exchanging the pointer

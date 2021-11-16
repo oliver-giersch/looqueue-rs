@@ -33,7 +33,7 @@ impl<T> Default for OwnedQueue<T> {
 
 impl<T> fmt::Debug for OwnedQueue<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "OwnedQueue {{ ... }}")
+        f.debug_struct("OwnedQueue").field("len", &self.len()).finish()
     }
 }
 
@@ -51,6 +51,7 @@ impl<T> OwnedQueue<T> {
 
     /// Returns the length of the queue.
     pub fn len(&self) -> usize {
+        // SAFETY: head & tail form a valid span
         unsafe { Span { start: &self.head, end: &self.tail }.len() }
     }
 
@@ -206,6 +207,7 @@ impl<'a, T> Iterator for Iter<'a, T> {
 
 impl<T> iter::ExactSizeIterator for Iter<'_, T> {
     fn len(&self) -> usize {
+        // SAFETY: curr & tail form a valid span
         unsafe { Span { start: &self.curr, end: self.tail }.len() }
     }
 }
@@ -233,6 +235,7 @@ impl<'a, T> Iterator for IterMut<'a, T> {
 
 impl<T> iter::ExactSizeIterator for IterMut<'_, T> {
     fn len(&self) -> usize {
+        // SAFETY: curr & tail form a valid span
         unsafe { Span { start: &self.curr, end: self.tail }.len() }
     }
 }
@@ -251,10 +254,13 @@ impl<T> Iterator for IntoIter<T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {
+            // prev is set, if `next_unchecked` advances the iterator from one node to another
             let mut prev = None;
             let ptr = self.queue.head.next_unchecked(&self.queue.tail, &mut prev);
             let elem = NonNull::new(ptr).map(|ptr| ptr.as_ptr().read());
 
+            // if the iterator advanced to another node, the previous one has to be de-allocated,
+            // since `IntoIter` owns the queue and all its memory
             if let Some(node) = prev {
                 Node::dealloc(node);
             }
@@ -293,6 +299,11 @@ struct Span<'a, T> {
 }
 
 impl<T> Span<'_, T> {
+    /// Returns the number of slots in this span.
+    ///
+    /// # Safety
+    ///
+    /// The span's start and end must be valid cursors.
     unsafe fn len(&self) -> usize {
         if self.start.ptr == self.end.ptr {
             self.end.idx - self.start.idx

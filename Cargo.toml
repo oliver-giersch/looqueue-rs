@@ -8,6 +8,7 @@ readme = "README.md"
 repository = "https://github.com/oliver-giersch/looqueue-rs.git"
 keywords = ["fifo", "queue", "concurrency", "mpmc", "mpsc"]
 edition = "2018"
+rust = "1.57"
 
 [dependencies]
 cfg-if = "1.0.0"

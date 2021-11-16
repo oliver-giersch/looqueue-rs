@@ -55,12 +55,10 @@ impl RefCounts {
     pub(crate) fn decrease_consumer_count(&self) -> Option<DropResult> {
         let prev = self.consumers.fetch_sub(1, Ordering::AcqRel);
         let is_last_consumer = prev == 1;
-
-        match (is_last_consumer, is_last_consumer && self.producers.load(Ordering::Acquire) == 0) {
-            (true, false) => Some(DropResult::LastOfKind),
-            (true, true) => Some(DropResult::LastOfAny),
-            (false, _) => None,
-        }
+        is_last_consumer.then(|| match self.producers.load(Ordering::Acquire) == 0 {
+            true => DropResult::LastOfAny,
+            false => DropResult::LastOfKind,
+        })
     }
 
     /// Returns the current number of producer threads.
@@ -91,11 +89,9 @@ impl RefCounts {
     pub(crate) fn decrease_producer_count(&self) -> Option<DropResult> {
         let prev = self.producers.fetch_sub(1, Ordering::AcqRel);
         let is_last_producer = prev == 1;
-
-        match (is_last_producer, is_last_producer && self.consumers.load(Ordering::Acquire) == 0) {
-            (true, false) => Some(DropResult::LastOfKind),
-            (true, true) => Some(DropResult::LastOfAny),
-            (false, _) => None,
-        }
+        is_last_producer.then(|| match self.consumers.load(Ordering::Acquire) == 0 {
+            true => DropResult::LastOfAny,
+            false => DropResult::LastOfKind,
+        })
     }
 }
